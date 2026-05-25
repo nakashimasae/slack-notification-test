@@ -1,0 +1,45 @@
+name: LP Pic Check
+
+on:
+  workflow_dispatch: # 手動実行用
+    inputs:
+      lp_url:
+        description: 'チェック対象LPのURL'
+        required: true
+      banner_url:
+        description: 'バナー画像の公開ダウンロードURL'
+        required: true
+  repository_dispatch: # Yoomなどの外部連携用
+    types: [lp-pic-check]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          npm install
+          npx playwright install chromium
+
+      - name: Run check script
+        env:
+          LP_URL: ${{ github.event.inputs.lp_url || github.event.client_payload.lp_url }}
+          BANNER_URL: ${{ github.event.inputs.banner_url || github.event.client_payload.banner_url }}
+          YOOM_WEBHOOK_URL: ${{ github.event.client_payload.yoom_webhook_url }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_PREFIX: ${{ secrets.S3_PREFIX }}
+          MATCH_THRESHOLD: 20
+        run: node check.mjs
