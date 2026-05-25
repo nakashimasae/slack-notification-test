@@ -16,7 +16,9 @@ function required(name) {
 }
 
 const LP_URL = required('LP_URL');
-const BANNER_URL = required('BANNER_URL');
+// ⭐ カンマ区切りのURLを配列に変換
+const BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
+
 const YOOM_WEBHOOK_URL = process.env.YOOM_WEBHOOK_URL || '';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
 const SLACK_CHANNEL = process.env.SLACK_CHANNEL || '';
@@ -27,7 +29,6 @@ const S3_BUCKET = process.env.S3_BUCKET || '';
 const S3_PREFIX = process.env.S3_PREFIX || '';
 const THRESHOLD = parseInt(process.env.MATCH_THRESHOLD || '20', 10);
 const S3_ENABLED = AWS_ACCESS_KEY_ID && AWS_SECRET_ACCESS_KEY && S3_BUCKET;
-
 const OUT_DIR = 'out';
 const TMP_DIR = 'tmp';
 
@@ -64,7 +65,6 @@ async function autoScroll(page) {
   await page.waitForTimeout(500);
 }
 
-// ⭕ 修正後の新しいコード
 async function downloadToFile(url, filepath) {
   if (!url.startsWith('http')) {
     const buf = await readFile(url);
@@ -87,23 +87,19 @@ async function hashUrl(url) {
   }
 }
 
-const s3Client = S3_ENABLED
-  ? new S3Client({
-      region: AWS_REGION,
-      credentials: { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY },
-    })
-  : null;
+const s3Client = S3_ENABLED ? new S3Client({
+  region: AWS_REGION,
+  credentials: { accessKeyId: AWS_ACCESS_KEY_ID, secretAccessKey: AWS_SECRET_ACCESS_KEY },
+}) : null;
 
 async function uploadToS3(filepath, key) {
   const buf = await readFile(filepath);
-  await s3Client.send(
-    new PutObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      Body: buf,
-      ContentType: 'image/jpeg',
-    })
-  );
+  await s3Client.send(new PutObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: key,
+    Body: buf,
+    ContentType: 'image/jpeg',
+  }));
   return `https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${key}`;
 }
 
@@ -112,12 +108,18 @@ async function main() {
   await mkdir(TMP_DIR, { recursive: true });
 
   console.log(`LP: ${LP_URL}`);
-  console.log(`Banner: ${BANNER_URL}`);
+  console.log(`Banners:`, BANNER_URLS);
 
-  const bannerPath = path.join(OUT_DIR, 'banner_input.png');
-  await downloadToFile(BANNER_URL, bannerPath);
-  const bannerHash = await imghash.hash(bannerPath, 8, 'hex');
-  console.log(`Banner hash: ${bannerHash}`);
+  // ⭐ 全バナーのハッシュを事前に計算して配列に保持
+  const banners = [];
+  for (let i = 0; i < BANNER_URLS.length; i++) {
+    const url = BANNER_URLS[i];
+    const bannerPath = path.join(OUT_DIR, `banner_input_${i}.png`);
+    await downloadToFile(url, bannerPath);
+    const bannerHash = await imghash.hash(bannerPath, 8, 'hex');
+    console.log(`Banner [${i}] hash: ${bannerHash} (${url})`);
+    banners.push({ id: i, url, hash: bannerHash });
+  }
 
   const browser = await chromium.launch();
   const viewports = [
@@ -125,18 +127,22 @@ async function main() {
     { name: 'SP', context: devices['iPhone 13'] },
   ];
 
-  const results = {};
+  // 結果格納用構造を変更
+  // results = { PC: { bannerIdx: { found, distance, bestSrc } }, SP: ... }
+  const results = { PC: {}, SP: {} };
+  const screenshots = { PC: {}, SP: {} };
 
   for (const v of viewports) {
     console.log(`--- ${v.name} ---`);
     const ctx = await browser.newContext(v.context);
     const page = await ctx.newPage();
     await page.goto(LP_URL, { waitUntil: 'load', timeout: 120000 });
-// 👇 【ここから追加】ポップアップを強制非表示 ＆ 閉じる処理
+
+    // ポップアップを強制非表示 ＆ 閉じる処理
     await page.addStyleTag({ content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }' }).catch(() => {});
     await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
     await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
-// 👆 【ここまで追加】
+
     await autoScroll(page);
     await page.waitForLoadState('networkidle').catch(() => {});
 
@@ -150,50 +156,69 @@ async function main() {
       screenshotUrl = await uploadToS3(screenshotPath, key);
       console.log(`Uploaded ${v.name} to S3: ${screenshotUrl}`);
     }
+    screenshots[v.name] = { path: screenshotPath, url: screenshotUrl };
 
-    const imageSrcs = await page.evaluate(() =>
-      Array.from(document.querySelectorAll('img'))
-        .filter((img) => img.complete && img.naturalWidth > 0)
-        .map((img) => img.currentSrc || img.src)
-        .filter((src) => src && !src.startsWith('data:'))
+    const imageSrcs = await page.evaluate(() => Array.from(document.querySelectorAll('img'))
+      .filter((img) => img.complete && img.naturalWidth > 0)
+      .map((img) => img.currentSrc || img.src)
+      .filter((src) => src && !src.startsWith('data:'))
     );
-
     const uniqueSrcs = [...new Set(imageSrcs)];
     console.log(`Found ${uniqueSrcs.length} loaded images`);
 
-    let bestDist = Infinity;
-    let bestSrc = null;
+    // ⭐ バナーごとに最小距離を追跡するための初期化
+    const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
+
     for (const src of uniqueSrcs) {
       try {
         const h = await hashUrl(src);
-        const d = hammingHex(bannerHash, h);
-        if (d < bestDist) {
-          bestDist = d;
-          bestSrc = src;
+        // ⭐ 1つの画像に対し、すべてのバナーハッシュとの距離を計算
+        for (const b of bannerMatches) {
+          const targetBanner = banners.find(x => x.id === b.id);
+          const d = hammingHex(targetBanner.hash, h);
+          if (d < b.bestDist) {
+            b.bestDist = d;
+            b.bestSrc = src;
+          }
         }
       } catch (e) {
         console.warn(`hash failed for ${src.slice(0, 80)}: ${e.message}`);
       }
     }
 
-    results[v.name] = {
-      found: bestDist <= THRESHOLD,
-      distance: bestDist,
-      bestSrc,
-      screenshotPath,
-      screenshotUrl,
-    };
-    console.log(`${v.name} best distance: ${bestDist} (threshold ${THRESHOLD}) -> ${results[v.name].found ? 'FOUND' : 'NOT FOUND'}`);
+    // ビューポートごとの結果を格納
+    for (const b of bannerMatches) {
+      results[v.name][b.id] = {
+        found: b.bestDist <= THRESHOLD,
+        distance: b.bestDist,
+        bestSrc: b.bestSrc,
+      };
+      console.log(`[Banner ${b.id}] ${v.name} best distance: ${b.bestDist} -> ${results[v.name][b.id].found ? 'FOUND' : 'NOT FOUND'}`);
+    }
+
     await ctx.close();
   }
-
   await browser.close();
 
-  const allFound = results.PC.found && results.SP.found;
-  const headline = allFound ? '✅ 問題なくアップされています' : '⚠️ 問題があります';
+  // ⭐ 全バナーがPC・SP共に見つかったかどうかの判定
+  let allFound = true;
+  const detailLines = [];
+
+  banners.forEach(b => {
+    const pcRes = results.PC[b.id];
+    const spRes = results.SP[b.id];
+    const isBannerOk = pcRes.found && spRes.found;
+    if (!isBannerOk) allFound = false;
+
+    // バナーごとのテキスト詳細
+    detailLines.push(`【バナー ${b.id + 1}】: ${b.url}`);
+    detailLines.push(`  *PC*: ${pcRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${pcRes.distance})`);
+    detailLines.push(`  *SP*: ${spRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${spRes.distance})`);
+  });
+
+  const headline = allFound ? '✅ すべてのバナーが問題なくアップされています' : '⚠️ 一部またはすべてのバナーに問題があります';
   const detail = [
-    `*PC*: ${results.PC.found ? '✅ 検出' : '❌ 未検出'} (距離 ${results.PC.distance})`,
-    `*SP*: ${results.SP.found ? '✅ 検出' : '❌ 未検出'} (距離 ${results.SP.distance})`,
+    ...detailLines,
     `LP: ${LP_URL}`,
     `閾値: ${THRESHOLD}（小さいほど類似）`,
   ].join('\n');
@@ -203,67 +228,66 @@ async function main() {
   console.log(detail);
   console.log('======================');
 
+  // ⭐ Yoom への通知 (構造をバナー配列対応に変更)
   if (YOOM_WEBHOOK_URL) {
-    const buildViewportPayload = async (r) => {
-      if (S3_ENABLED && r.screenshotUrl) {
-        return {
-          found: r.found,
-          distance: r.distance,
-          image_url: r.screenshotUrl,
-        };
+    const buildViewportPayload = async (name, bannerId) => {
+      const r = results[name][bannerId];
+      const s = screenshots[name];
+      if (S3_ENABLED && s.url) {
+        return { found: r.found, distance: r.distance, image_url: s.url };
       }
       return {
         found: r.found,
         distance: r.distance,
-        image_b64: (await readFile(r.screenshotPath)).toString('base64'),
-        image_filename: path.basename(r.screenshotPath),
+        image_b64: (await readFile(s.path)).toString('base64'),
+        image_filename: path.basename(s.path),
         image_mime: 'image/jpeg',
       };
     };
+
+    const yoomBanners = [];
+    for (const b of banners) {
+      yoomBanners.push({
+        url: b.url,
+        pc: await buildViewportPayload('PC', b.id),
+        sp: await buildViewportPayload('SP', b.id),
+      });
+    }
 
     const payload = {
       headline,
       all_found: allFound,
       lp_url: LP_URL,
       threshold: THRESHOLD,
-      pc: await buildViewportPayload(results.PC),
-      sp: await buildViewportPayload(results.SP),
+      banners: yoomBanners // 複数のバナー結果を配列で渡す
     };
-    const payloadSize = Buffer.byteLength(JSON.stringify(payload));
-    console.log(`Yoom payload size: ${(payloadSize / 1024 / 1024).toFixed(2)} MB`);
 
     const resp = await fetch(YOOM_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    if (!resp.ok) {
-      console.error(`Yoom webhook failed: HTTP ${resp.status} ${await resp.text()}`);
-    } else {
-      console.log(`Yoom webhook posted (HTTP ${resp.status}).`);
-    }
-  } else {
-    console.log('YOOM_WEBHOOK_URL not set. Skipping Yoom callback.');
+    if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
   }
 
+  // ⭐ Slack への通知
   if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
     const slack = new WebClient(SLACK_BOT_TOKEN);
     const post = await slack.chat.postMessage({
       channel: SLACK_CHANNEL,
       text: `${headline}\n${detail}`,
     });
+
     for (const v of viewports) {
       await slack.files.uploadV2({
         channel_id: SLACK_CHANNEL,
         thread_ts: post.ts,
-        file: results[v.name].screenshotPath,
+        file: screenshots[v.name].path,
         filename: `${v.name}.png`,
-        initial_comment: `${v.name} スクリーンショット`,
+        initial_comment: `${v.name} 全画面スクリーンショット`,
       });
     }
     console.log('Slack post done.');
-  } else {
-    console.log('Slack credentials not set. Skipping Slack post (screenshots are uploaded as workflow artifacts).');
   }
 
   if (!allFound) process.exit(1);
