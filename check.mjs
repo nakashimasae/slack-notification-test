@@ -126,6 +126,11 @@ async function main() {
     const ctx = await browser.newContext(v.context);
     const page = await ctx.newPage();
     await page.goto(LP_URL, { waitUntil: 'load', timeout: 120000 });
+// 👇 【ここから追加】ポップアップを強制非表示 ＆ 閉じる処理
+    await page.addStyleTag({ content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }' }).catch(() => {});
+    await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
+    await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
+// 👆 【ここまで追加】
     await autoScroll(page);
     await page.waitForLoadState('networkidle').catch(() => {});
 
