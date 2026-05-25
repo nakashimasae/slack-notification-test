@@ -125,7 +125,7 @@ async function main() {
     console.log(`--- ${v.name} ---`);
     const ctx = await browser.newContext(v.context);
     const page = await ctx.newPage();
-    await page.goto(LP_URL, { waitUntil: 'networkidle', timeout: 60000 });
+    await page.goto(LP_URL, { waitUntil: 'networkidle', timeout: 120000 });
     await autoScroll(page);
     await page.waitForLoadState('networkidle').catch(() => {});
 
