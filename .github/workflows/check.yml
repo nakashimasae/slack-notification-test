@@ -33,18 +33,10 @@ steps:
       - name: Get banner files from repository
         id: get_banners
         run: |
-          # 例1：ルート直下にある「rinpashu_」から始まるjpgファイルをすべて取得する場合
-          # FILES=$(find . -maxdepth 1 -name "rinpashu_*.jpg" | sed 's|^\./||' | paste -sd, -)
-          
-          # 例2：もし「banners」というフォルダを作って、その中の画像をすべて対象にする場合
-          # (フォルダが存在しないとエラーになるため、運用の形に合わせて切り替えてください)
-          # FILES=$(find banners -type f \( -name "*.jpg" -o -name "*.png" \) | paste -sd, -)
-          
-          # 現在のルート直下にあるjpgファイルを対象とする記述例：
-          FILES=$(find . -maxdepth 1 -name "*.jpg" -not -name ".*" | sed 's|^\./||' | paste -sd, -)
+          # bannersフォルダ配下の、すべてのフォルダの中にあるjpg/pngファイルを自動で全検索してカンマ区切りにする
+          FILES=$(find banners -type f \( -name "*.jpg" -o -name "*.png" \) | paste -sd, -)
           
           echo "Found banners: $FILES"
-          # 環境変数として次のステップに引き渡す
           echo "AUTO_BANNER_PATHS=$FILES" >> $GITHUB_ENV
 
       - name: Run check script
