@@ -15,8 +15,8 @@ function required(name) {
   return v;
 }
 
-const LP_URL = required('LP_URL');
-// ⭐ カンマ区切りのURLを配列に変換
+// ⭐ LP URLもカンマ区切りで配列に変換
+const LP_URLS = required('LP_URL').split(',').map(url => url.trim());
 const BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
 
 const YOOM_WEBHOOK_URL = process.env.YOOM_WEBHOOK_URL || '';
@@ -107,17 +107,16 @@ async function main() {
   await mkdir(OUT_DIR, { recursive: true });
   await mkdir(TMP_DIR, { recursive: true });
 
-  console.log(`LP: ${LP_URL}`);
+  console.log(`LPs:`, LP_URLS);
   console.log(`Banners:`, BANNER_URLS);
 
-  // ⭐ 全バナーのハッシュを事前に計算して配列に保持
+  // 全バナーのハッシュを事前に計算（LPが変わっても共通なので1回だけでOK）
   const banners = [];
   for (let i = 0; i < BANNER_URLS.length; i++) {
     const url = BANNER_URLS[i];
     const bannerPath = path.join(OUT_DIR, `banner_input_${i}.png`);
     await downloadToFile(url, bannerPath);
     const bannerHash = await imghash.hash(bannerPath, 8, 'hex');
-    console.log(`Banner [${i}] hash: ${bannerHash} (${url})`);
     banners.push({ id: i, url, hash: bannerHash });
   }
 
@@ -127,141 +126,147 @@ async function main() {
     { name: 'SP', context: devices['iPhone 13'] },
   ];
 
-  // 結果格納用構造を変更
-  // results = { PC: { bannerIdx: { found, distance, bestSrc } }, SP: ... }
-  const results = { PC: {}, SP: {} };
-  const screenshots = { PC: {}, SP: {} };
+  // 全LPの結果を蓄積する配列
+  const allResults = [];
+  let totalAllFound = true;
 
-  for (const v of viewports) {
-    console.log(`--- ${v.name} ---`);
-    const ctx = await browser.newContext(v.context);
-    const page = await ctx.newPage();
-    await page.goto(LP_URL, { waitUntil: 'load', timeout: 120000 });
+  // ⭐ LP URLのループを追加
+  for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
+    const lpUrl = LP_URLS[lpIdx];
+    console.log(`\n=========================================`);
+    console.log(`Processing LP [${lpIdx + 1}/${LP_URLS.length}]: ${lpUrl}`);
+    console.log(`=========================================`);
 
-    // ポップアップを強制非表示 ＆ 閉じる処理
-    await page.addStyleTag({ content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }' }).catch(() => {});
-    await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
-    await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
+    const results = { PC: {}, SP: {} };
+    const screenshots = { PC: {}, SP: {} };
 
-    await autoScroll(page);
-    await page.waitForLoadState('networkidle').catch(() => {});
+    for (const v of viewports) {
+      console.log(`--- ${v.name} ---`);
+      const ctx = await browser.newContext(v.context);
+      const page = await ctx.newPage();
 
-    const screenshotPath = path.join(OUT_DIR, `${v.name}.jpg`);
-    await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
-
-    let screenshotUrl = null;
-    if (S3_ENABLED) {
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      const key = `${S3_PREFIX}${ts}_${v.name}.jpg`;
-      screenshotUrl = await uploadToS3(screenshotPath, key);
-      console.log(`Uploaded ${v.name} to S3: ${screenshotUrl}`);
-    }
-    screenshots[v.name] = { path: screenshotPath, url: screenshotUrl };
-
-    const imageSrcs = await page.evaluate(() => Array.from(document.querySelectorAll('img'))
-      .filter((img) => img.complete && img.naturalWidth > 0)
-      .map((img) => img.currentSrc || img.src)
-      .filter((src) => src && !src.startsWith('data:'))
-    );
-    const uniqueSrcs = [...new Set(imageSrcs)];
-    console.log(`Found ${uniqueSrcs.length} loaded images`);
-
-    // ⭐ バナーごとに最小距離を追跡するための初期化
-    const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
-
-    for (const src of uniqueSrcs) {
       try {
-        const h = await hashUrl(src);
-        // ⭐ 1つの画像に対し、すべてのバナーハッシュとの距離を計算
-        for (const b of bannerMatches) {
-          const targetBanner = banners.find(x => x.id === b.id);
-          const d = hammingHex(targetBanner.hash, h);
-          if (d < b.bestDist) {
-            b.bestDist = d;
-            b.bestSrc = src;
+        await page.goto(lpUrl, { waitUntil: 'load', timeout: 120000 });
+
+        await page.addStyleTag({ content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }' }).catch(() => {});
+        await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
+        await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
+
+        await autoScroll(page);
+        await page.waitForLoadState('networkidle').catch(() => {});
+
+        // ファイル名にLPのインデックスを含めてバッティングを防ぐ
+        const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
+        await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
+
+        let screenshotUrl = null;
+        if (S3_ENABLED) {
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          const key = `${S3_PREFIX}${ts}_lp${lpIdx}_${v.name}.jpg`;
+          screenshotUrl = await uploadToS3(screenshotPath, key);
+        }
+        screenshots[v.name] = { path: screenshotPath, url: screenshotUrl };
+
+        const imageSrcs = await page.evaluate(() => Array.from(document.querySelectorAll('img'))
+          .filter((img) => img.complete && img.naturalWidth > 0)
+          .map((img) => img.currentSrc || img.src)
+          .filter((src) => src && !src.startsWith('data:'))
+        );
+        const uniqueSrcs = [...new Set(imageSrcs)];
+
+        const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
+
+        for (const src of uniqueSrcs) {
+          try {
+            const h = await hashUrl(src);
+            for (const b of bannerMatches) {
+              const targetBanner = banners.find(x => x.id === b.id);
+              const d = hammingHex(targetBanner.hash, h);
+              if (d < b.bestDist) {
+                b.bestDist = d;
+                b.bestSrc = src;
+              }
+            }
+          } catch (e) {
+            console.warn(`hash failed for ${src.slice(0, 80)}: ${e.message}`);
           }
         }
-      } catch (e) {
-        console.warn(`hash failed for ${src.slice(0, 80)}: ${e.message}`);
+
+        for (const b of bannerMatches) {
+          results[v.name][b.id] = {
+            found: b.bestDist <= THRESHOLD,
+            distance: b.bestDist,
+            bestSrc: b.bestSrc,
+          };
+        }
+      } catch (err) {
+        console.error(`Failed to process LP ${lpUrl}:`, err);
+        for (const b of banners) {
+          results[v.name][b.id] = { found: false, distance: Infinity, bestSrc: null };
+        }
+        screenshots[v.name] = { path: null, url: null };
+      } finally {
+        await ctx.close();
       }
     }
 
-    // ビューポートごとの結果を格納
-    for (const b of bannerMatches) {
-      results[v.name][b.id] = {
-        found: b.bestDist <= THRESHOLD,
-        distance: b.bestDist,
-        bestSrc: b.bestSrc,
-      };
-      console.log(`[Banner ${b.id}] ${v.name} best distance: ${b.bestDist} -> ${results[v.name][b.id].found ? 'FOUND' : 'NOT FOUND'}`);
-    }
-
-    await ctx.close();
+    allResults.push({ lpUrl, lpIdx, results, screenshots });
   }
   await browser.close();
 
-  // ⭐ 全バナーがPC・SP共に見つかったかどうかの判定
-  let allFound = true;
+  // ⭐ 通知用テキストの組み立て（全LP分を網羅）
   const detailLines = [];
+  allResults.forEach(item => {
+    detailLines.push(`\n🌐 *LP*: ${item.lpUrl}`);
+    banners.forEach(b => {
+      const pcRes = item.results.PC[b.id];
+      const spRes = item.results.SP[b.id];
+      if (!pcRes.found || !spRes.found) totalAllFound = false;
 
-  banners.forEach(b => {
-    const pcRes = results.PC[b.id];
-    const spRes = results.SP[b.id];
-    const isBannerOk = pcRes.found && spRes.found;
-    if (!isBannerOk) allFound = false;
-
-    // バナーごとのテキスト詳細
-    detailLines.push(`【バナー ${b.id + 1}】: ${b.url}`);
-    detailLines.push(`  *PC*: ${pcRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${pcRes.distance})`);
-    detailLines.push(`  *SP*: ${spRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${spRes.distance})`);
+      detailLines.push(`  【バナー ${b.id + 1}】: ${b.url}`);
+      detailLines.push(`    *PC*: ${pcRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${pcRes.distance})`);
+      detailLines.push(`    *SP*: ${spRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${spRes.distance})`);
+    });
   });
 
-  const headline = allFound ? '✅ すべてのバナーが問題なくアップされています' : '⚠️ 一部またはすべてのバナーに問題があります';
-  const detail = [
-    ...detailLines,
-    `LP: ${LP_URL}`,
-    `閾値: ${THRESHOLD}（小さいほど類似）`,
-  ].join('\n');
+  const headline = totalAllFound ? '✅ すべてのLPで、すべてのバナーが問題なくアップされています' : '⚠️ 一部またはすべてのLP・バナーに問題があります';
+  const detail = [...detailLines, `\n閾値: ${THRESHOLD}`].join('\n');
 
-  console.log('====== 判定結果 ======');
+  console.log('====== 総合判定結果 ======');
   console.log(headline);
   console.log(detail);
-  console.log('======================');
+  console.log('==========================');
 
-  // ⭐ Yoom への通知 (構造をバナー配列対応に変更)
+  // ⭐ Yoom への通知（LPごとの配列構造にペイロードを変更）
   if (YOOM_WEBHOOK_URL) {
-    const buildViewportPayload = async (name, bannerId) => {
-      const r = results[name][bannerId];
-      const s = screenshots[name];
-      if (S3_ENABLED && s.url) {
-        return { found: r.found, distance: r.distance, image_url: s.url };
-      }
-      return {
-        found: r.found,
-        distance: r.distance,
-        image_b64: (await readFile(s.path)).toString('base64'),
-        image_filename: path.basename(s.path),
-        image_mime: 'image/jpeg',
-      };
-    };
+    const yoomLps = [];
+    for (const item of allResults) {
+      const yoomBanners = [];
+      for (const b of banners) {
+        const buildViewportPayload = async (name) => {
+          const r = item.results[name][b.id];
+          const s = item.screenshots[name];
+          if (!s.path) return { found: false, distance: Infinity };
+          if (S3_ENABLED && s.url) return { found: r.found, distance: r.distance, image_url: s.url };
+          return {
+            found: r.found,
+            distance: r.distance,
+            image_b64: (await readFile(s.path)).toString('base64'),
+            image_filename: path.basename(s.path),
+            image_mime: 'image/jpeg',
+          };
+        };
 
-    const yoomBanners = [];
-    for (const b of banners) {
-      yoomBanners.push({
-        url: b.url,
-        pc: await buildViewportPayload('PC', b.id),
-        sp: await buildViewportPayload('SP', b.id),
-      });
+        yoomBanners.push({
+          url: b.url,
+          pc: await buildViewportPayload('PC'),
+          sp: await buildViewportPayload('SP'),
+        });
+      }
+      yoomLps.push({ lp_url: item.lpUrl, banners: yoomBanners });
     }
 
-    const payload = {
-      headline,
-      all_found: allFound,
-      lp_url: LP_URL,
-      threshold: THRESHOLD,
-      banners: yoomBanners // 複数のバナー結果を配列で渡す
-    };
-
+    const payload = { headline, all_found: totalAllFound, threshold: THRESHOLD, lps: yoomLps };
     const resp = await fetch(YOOM_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -270,7 +275,7 @@ async function main() {
     if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
   }
 
-  // ⭐ Slack への通知
+  // ⭐ Slack への通知（1つの投稿に対し、各LPのスクショをスレッドでぶら下げる）
   if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
     const slack = new WebClient(SLACK_BOT_TOKEN);
     const post = await slack.chat.postMessage({
@@ -278,19 +283,23 @@ async function main() {
       text: `${headline}\n${detail}`,
     });
 
-    for (const v of viewports) {
-      await slack.files.uploadV2({
-        channel_id: SLACK_CHANNEL,
-        thread_ts: post.ts,
-        file: screenshots[v.name].path,
-        filename: `${v.name}.png`,
-        initial_comment: `${v.name} 全画面スクリーンショット`,
-      });
+    for (const item of allResults) {
+      for (const v of viewports) {
+        const s = item.screenshots[v.name];
+        if (s.path) {
+          await slack.files.uploadV2({
+            channel_id: SLACK_CHANNEL,
+            thread_ts: post.ts,
+            file: s.path,
+            filename: `lp_${item.lpIdx}_${v.name}.png`,
+            initial_comment: `LP [${item.lpIdx + 1}] ${v.name} スクリーンショット`,
+          });
+        }
+      }
     }
-    console.log('Slack post done.');
   }
 
-  if (!allFound) process.exit(1);
+  if (!totalAllFound) process.exit(1);
 }
 
 main().catch((err) => {
