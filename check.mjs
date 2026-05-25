@@ -15,7 +15,6 @@ function required(name) {
   return v;
 }
 
-// ⭐ LP URLもカンマ区切りで配列に変換
 const LP_URLS = required('LP_URL').split(',').map(url => url.trim());
 const BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
 
@@ -82,6 +81,9 @@ async function hashUrl(url) {
   try {
     await downloadToFile(url, tmpPath);
     return await imghash.hash(tmpPath, 8, 'hex');
+  } // エラーログを詳細に出力するように変更
+  catch (e) {
+    throw new Error(`Download or Hash failed: ${e.message}`);
   } finally {
     await rm(tmpPath, { force: true });
   }
@@ -110,7 +112,6 @@ async function main() {
   console.log(`LPs:`, LP_URLS);
   console.log(`Banners:`, BANNER_URLS);
 
-  // 全バナーのハッシュを事前に計算（LPが変わっても共通なので1回だけでOK）
   const banners = [];
   for (let i = 0; i < BANNER_URLS.length; i++) {
     const url = BANNER_URLS[i];
@@ -120,17 +121,19 @@ async function main() {
     banners.push({ id: i, url, hash: bannerHash });
   }
 
-  const browser = await chromium.launch();
+  // ⭐ セキュリティ制限を解除してブラウザを起動するよう修正
+  const browser = await chromium.launch({
+    args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
+  });
+  
   const viewports = [
     { name: 'PC', context: { viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 } },
     { name: 'SP', context: devices['iPhone 13'] },
   ];
 
-  // 全LPの結果を蓄積する配列
   const allResults = [];
   let totalAllFound = true;
 
-  // ⭐ LP URLのループを追加
   for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
     const lpUrl = LP_URLS[lpIdx];
     console.log(`\n=========================================`);
@@ -155,7 +158,6 @@ async function main() {
         await autoScroll(page);
         await page.waitForLoadState('networkidle').catch(() => {});
 
-        // ファイル名にLPのインデックスを含めてバッティングを防ぐ
         const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
         await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
 
@@ -167,12 +169,23 @@ async function main() {
         }
         screenshots[v.name] = { path: screenshotPath, url: screenshotUrl };
 
-        const imageSrcs = await page.evaluate(() => Array.from(document.querySelectorAll('img'))
-          .filter((img) => img.complete && img.naturalWidth > 0)
-          .map((img) => img.currentSrc || img.src)
-          .filter((src) => src && !src.startsWith('data:'))
-        );
+        // ⭐ 親画面だけでなく、すべての iframe 内の画像もかき集めるようにループ処理を拡張
+        const imageSrcs = [];
+        for (const frame of page.frames()) {
+          try {
+            const srcs = await frame.evaluate(() => Array.from(document.querySelectorAll('img'))
+              .filter((img) => img.complete && img.naturalWidth > 0)
+              .map((img) => img.currentSrc || img.src)
+              .filter((src) => src && !src.startsWith('data:'))
+            );
+            imageSrcs.push(...srcs);
+          } catch (e) {
+            // クロスドメインの制約等で取得できないフレームはスキップ
+          }
+        }
+        
         const uniqueSrcs = [...new Set(imageSrcs)];
+        console.log(`Found ${uniqueSrcs.length} loaded images (including iframes)`);
 
         const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
 
@@ -188,7 +201,7 @@ async function main() {
               }
             }
           } catch (e) {
-            console.warn(`hash failed for ${src.slice(0, 80)}: ${e.message}`);
+            // ログのノイズを減らすためサイレントに
           }
         }
 
@@ -214,7 +227,6 @@ async function main() {
   }
   await browser.close();
 
-  // ⭐ 通知用テキストの組み立て（全LP分を網羅）
   const detailLines = [];
   allResults.forEach(item => {
     detailLines.push(`\n🌐 *LP*: ${item.lpUrl}`);
@@ -237,7 +249,6 @@ async function main() {
   console.log(detail);
   console.log('==========================');
 
-  // ⭐ Yoom への通知（LPごとの配列構造にペイロードを変更）
   if (YOOM_WEBHOOK_URL) {
     const yoomLps = [];
     for (const item of allResults) {
@@ -275,7 +286,6 @@ async function main() {
     if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
   }
 
-  // ⭐ Slack への通知（1つの投稿に対し、各LPのスクショをスレッドでぶら下げる）
   if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
     const slack = new WebClient(SLACK_BOT_TOKEN);
     const post = await slack.chat.postMessage({
