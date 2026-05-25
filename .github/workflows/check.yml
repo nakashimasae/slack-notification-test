@@ -29,20 +29,18 @@ steps:
           npm install
           npx playwright install chromium
 
-      # ⭐ 特定のフォルダやファイルからパスを自動抽出するステップ
+      # 📁 bannersフォルダ（子フォルダ含む）から画像を自動抽出するステップ
       - name: Get banner files from repository
         id: get_banners
         run: |
-          # bannersフォルダ配下の、すべてのフォルダの中にあるjpg/pngファイルを自動で全検索してカンマ区切りにする
           FILES=$(find banners -type f \( -name "*.jpg" -o -name "*.png" \) | paste -sd, -)
-          
           echo "Found banners: $FILES"
           echo "AUTO_BANNER_PATHS=$FILES" >> $GITHUB_ENV
 
       - name: Run check script
         env:
           LP_URL: ${{ github.event.inputs.lp_url || github.event.client_payload.lp_url }}
-          # ⭐ 手動入力（またはYoom連携）があればそれを使い、空なら自動抽出したパスを使う
+          # 空欄なら自動抽出したパス（AUTO_BANNER_PATHS）を使う設定
           BANNER_URL: ${{ github.event.inputs.banner_url || github.event.client_payload.banner_url || env.AUTO_BANNER_PATHS }}
           YOOM_WEBHOOK_URL: ${{ github.event.client_payload.yoom_webhook_url }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
