@@ -1,0 +1,18 @@
+name: Slack Notification
+
+on:
+  push:
+    branches: [ "main" ] # mainブランチにファイルが保存されたら動く設定です
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slackにメッセージを送信
+        uses: slackapi/slack-github-action@v3.0.3
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "${{ secrets.SLACK_CHANNEL }}"
+            text: "🚀 GitHub Actionsのテスト通知です！大成功！"
