@@ -15,7 +15,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    steps:
+steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -29,10 +29,29 @@ jobs:
           npm install
           npx playwright install chromium
 
+      # ⭐ 特定のフォルダやファイルからパスを自動抽出するステップ
+      - name: Get banner files from repository
+        id: get_banners
+        run: |
+          # 例1：ルート直下にある「rinpashu_」から始まるjpgファイルをすべて取得する場合
+          # FILES=$(find . -maxdepth 1 -name "rinpashu_*.jpg" | sed 's|^\./||' | paste -sd, -)
+          
+          # 例2：もし「banners」というフォルダを作って、その中の画像をすべて対象にする場合
+          # (フォルダが存在しないとエラーになるため、運用の形に合わせて切り替えてください)
+          # FILES=$(find banners -type f \( -name "*.jpg" -o -name "*.png" \) | paste -sd, -)
+          
+          # 現在のルート直下にあるjpgファイルを対象とする記述例：
+          FILES=$(find . -maxdepth 1 -name "*.jpg" -not -name ".*" | sed 's|^\./||' | paste -sd, -)
+          
+          echo "Found banners: $FILES"
+          # 環境変数として次のステップに引き渡す
+          echo "AUTO_BANNER_PATHS=$FILES" >> $GITHUB_ENV
+
       - name: Run check script
         env:
           LP_URL: ${{ github.event.inputs.lp_url || github.event.client_payload.lp_url }}
-          BANNER_URL: ${{ github.event.inputs.banner_url || github.event.client_payload.banner_url }}
+          # ⭐ 手動入力（またはYoom連携）があればそれを使い、空なら自動抽出したパスを使う
+          BANNER_URL: ${{ github.event.inputs.banner_url || github.event.client_payload.banner_url || env.AUTO_BANNER_PATHS }}
           YOOM_WEBHOOK_URL: ${{ github.event.client_payload.yoom_webhook_url }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
