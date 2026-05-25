@@ -1,14 +1,14 @@
 name: LP Pic Check
 
 on:
-  workflow_dispatch: # 手動実行用
+  workflow_dispatch:
     inputs:
       lp_url:
         description: 'チェック対象LPのURL'
         required: true
       banner_url:
         description: 'バナー画像の公開ダウンロードURL'
-        required: true
+        required: false # 👈 ここを「true」から「false」に書き換えます！
   repository_dispatch: # Yoomなどの外部連携用
     types: [lp-pic-check]
 
