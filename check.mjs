@@ -64,7 +64,13 @@ async function autoScroll(page) {
   await page.waitForTimeout(500);
 }
 
+// ⭕ 修正後の新しいコード
 async function downloadToFile(url, filepath) {
+  if (!url.startsWith('http')) {
+    const buf = await readFile(url);
+    await writeFile(filepath, buf);
+    return;
+  }
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${url}`);
   const buf = Buffer.from(await resp.arrayBuffer());
