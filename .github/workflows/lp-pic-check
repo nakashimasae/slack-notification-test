@@ -1,0 +1,57 @@
+name: LP Picture Check
+
+on:
+  repository_dispatch:
+    types: [lp-pic-check] # Yoomの "event_type" と一致させます
+
+jobs:
+  lp-check-job:
+    runs-on: ubuntu-latest
+    steps:
+      - name: コードのチェックアウト
+        uses: actions/checkout@v4
+
+      - name: 画像チェック処理の実行
+        id: checker
+        run: |
+          # Yoomから渡されたデータは ${{ github.event.client_payload.キー名 }} で取得できます
+          LP_URL="${{ github.event.client_payload.lp_url }}"
+          BANNER_URL="${{ github.event.client_payload.banner_url }}"
+          
+          echo "対象LP: $LP_URL"
+          echo "対象バナー: $BANNER_URL"
+          
+          # ---------------------------------------------------------
+          # ここで実際の画像チェックプログラム（PythonやNode.js等）を実行します
+          # 例: python check_lp.py --lp $LP_URL --banner $BANNER_URL
+          # ---------------------------------------------------------
+
+      - name: Yoomへ結果を返却（Webhook）
+        # Yoomから webhook_url が送られてきた場合のみ実行
+        if: ${{ github.event.client_payload.yoom_webhook_url != '' }}
+        run: |
+          YOOM_URL="${{ github.event.client_payload.yoom_webhook_url }}"
+          
+          # 渡却するJSONデータを組み立て（※実際のスクリプトの結果を反映させてください）
+          JSON_PAYLOAD=$(cat <<EOF
+          {
+            "headline": "✅ 問題なくアップされています",
+            "all_found": true,
+            "lp_url": "${{ github.event.client_payload.lp_url }}",
+            "threshold": 20,
+            "pc": {
+              "found": true,
+              "distance": 0,
+              "image_url": "https://..." 
+            },
+            "sp": {
+              "found": true,
+              "distance": 5,
+              "image_url": "https://..."
+            }
+          }
+          EOF
+          )
+          
+          # YoomへPOST
+          curl -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "$YOOM_URL"
