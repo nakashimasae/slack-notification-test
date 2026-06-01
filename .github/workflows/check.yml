@@ -2,17 +2,54 @@ name: LP Banner Check
 
 on:
   workflow_dispatch:
-    inputs:
-      lp_url:
-        description: 'チェック対象LPのURL（カンマ区切りで複数可）'
-        required: true
-      banner_url:
-        description: 'バナー画像の公開ダウンロードURL（空欄ならリポジトリ内を自動読込）'
-        required: false
 
 jobs:
-  check:
+  # -----------------------------------------------------------------
+  # 1. カンマ区切りのURL文字列を分解して、JSONの配列形式に変換するジョブ
+  # -----------------------------------------------------------------
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      thread_ts: ${{ steps.slack-init.outputs.thread_ts }} # 🌟この行が足りていませんでした！
+    steps:
+      - name: Generate URL matrix
+        id: set-matrix
+        env:
+          RAW_URLS: ${{ secrets.LP_URL }}
+        run: |
+          # カンマ区切りのURLを ["url1", "url2"] のようなJSON配列に安全に変換します
+          URLS_JSON=$(node -e "console.log(JSON.stringify(process.env.RAW_URLS.split(',').map(u => u.trim()).filter(Boolean)))")
+          echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
+
+      # 最初に1通だけ親メッセージを投稿してID（ts）を記憶する
+      - name: Create Parent Slack Message
+        id: slack-init
+        run: |
+          RES=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"channel":"${{ secrets.SLACK_CHANNEL }}","text":"🚀 *LPバナーチェックを一括開始しました* (並列処理中...)"}' \
+            https://slack.com/api/chat.postMessage)
+          TS=$(echo $RES | jq -r '.ts')
+          echo "thread_ts=${TS}" >> $GITHUB_OUTPUT
+
+  # -----------------------------------------------------------------
+  # 2. 分解したURLの数だけ、並列でチェックを実行するジョブ
+  # -----------------------------------------------------------------
+  check:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      # ★ここが並列化の核心設定です
+      matrix:
+        lp_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      
+      # ターゲットサイトへの過度な負荷を防ぐため、同時に動く最大サーバー数を「5台」に制限
+      max-parallel: 5 
+      
+      # どこか1つのURLでエラー（バナー未検出など）が起きても、他のURLのチェックを巻き添えで止めない
+      fail-fast: false 
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -20,33 +57,24 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
+          cache: 'npm'
 
       - name: Install dependencies
-        run: |
-          npm install
-          sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
-          npx playwright install chromium
-
-      # 📁 bannersフォルダ（子フォルダ含む）から画像を自動抽出するステップ
-      - name: Get banner files from repository
-        id: get_banners
-        run: |
-          FILES=$(find banners -type f \( -name "*.jpg" -o -name "*.png" \) | paste -sd, -)
-          echo "Found banners: $FILES"
-          echo "AUTO_BANNER_PATHS=$FILES" >> $GITHUB_ENV
+        run: npm install
 
       - name: Run check script
         env:
-          LP_URL: ${{ github.event.inputs.lp_url || github.event.client_payload.lp_url }}
-          BANNER_URL: ${{ github.event.inputs.banner_url || github.event.client_payload.banner_url || env.AUTO_BANNER_PATHS }}
-          YOOM_WEBHOOK_URL: ${{ github.event.client_payload.yoom_webhook_url }}
+          # ★ここがポイント！マトリックスから1つのURLだけがスクリプトに渡されます
+          LP_URL: ${{ matrix.lp_url }} 
+          # 受け取った親メッセージのIDを環境変数としてスクリプトに渡す
+          PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }} 
+          BANNER_URL: ${{ secrets.BANNER_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
-          MATCH_THRESHOLD: 20
+          YOOM_WEBHOOK_URL: ${{ secrets.YOOM_WEBHOOK_URL }}
         run: node check.mjs
