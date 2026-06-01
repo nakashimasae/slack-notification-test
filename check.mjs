@@ -7,13 +7,17 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 function required(name) {
-  const v = process.env[name];
+  const v = process.env[name]; 
   if (!v) {
-    console.error(`Missing required env: ${name}`);
-    process.exit(2);
-  }
-  return v;
-}
+    // 💡 即座に終了させず、エラーを発生させて後ろの main().catch で捕まえるようにします
+    throw new Error(`必要な環境変数 [${name}] が設定されていません。`); 
+  } 
+  return v; 
+} 
+
+// 変数の宣言だけを上で行い、中身の代入は main() の中で行うように変更します
+let LP_URLS = [];
+let BANNER_URLS = [];
 
 const LP_URLS = required('LP_URL').split(',').map(url => url.trim());
 const BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
@@ -106,9 +110,13 @@ async function uploadToS3(filepath, key) {
 }
 
 async function main() {
-  await mkdir(OUT_DIR, { recursive: true });
-  await mkdir(TMP_DIR, { recursive: true });
+  // 💡 main関数の先頭で、環境変数のチェックと切り分けを実行します
+  LP_URLS = required('LP_URL').split(',').map(url => url.trim());
+  BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
 
+  await mkdir(OUT_DIR, { recursive: true }); 
+  await mkdir(TMP_DIR, { recursive: true });
+  
   console.log(`LPs:`, LP_URLS);
   console.log(`Banners:`, BANNER_URLS);
 
@@ -332,7 +340,26 @@ if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
   if (!totalAllFound) process.exit(1);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
+main().catch(async (err) => {
+  console.error(err); 
+  
+  // 💡 起動エラーや処理中のエラーをキャッチして、Slackのスレッドに原因を書き込みます
+  const token = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_CHANNEL;
+  const threadTs = process.env.PARENT_THREAD_TS;
+  
+  if (token && channel) {
+    try {
+      const slack = new WebClient(token);
+      await slack.chat.postMessage({
+        channel: channel,
+        thread_ts: threadTs,
+        text: `❌ エラーが発生したため処理を中断しました。\n*原因*: ${err.message}`
+      });
+    } catch (slackErr) {
+      console.error('Slackへのエラー通知に失敗しました:', slackErr);
+    }
+  }
+  
+  process.exit(2); 
 });
