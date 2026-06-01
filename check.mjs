@@ -299,40 +299,31 @@ for (const res of hashResults) {
     if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
   }
 
-  if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
+if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
     const slack = new WebClient(SLACK_BOT_TOKEN);
 
-    // 1. 親メッセージ：チェックタイトルのみを投稿
-    const post = await slack.chat.postMessage({
-      channel: SLACK_CHANNEL,
-      text: "📸 *LP Banner Check を実行しました*",
-    });
-
-    // 2. 結果のテキストをスレッド（thread_ts）へ投稿
+    // 1. 結果のテキスト（タイトルと詳細を1通に合体）を親スレッドへ投稿
     await slack.chat.postMessage({
       channel: SLACK_CHANNEL,
-      thread_ts: post.ts,
-      text: `${headline}\n${detail}`,
+      thread_ts: process.env.PARENT_THREAD_TS,
+      text: `📸 *[LP Check]* ${headline}\n${detail}`,
     });
 
-    // 3. キャプチャ画像をスレッド（thread_ts）へアップロード（既存の処理）
+    // 2. キャプチャ画像を親スレッドへアップロード
     for (const item of allResults) {
       for (const v of viewports) {
         const s = item.screenshots[v.name];
         if (s.path) {
-    // 変数名は実際のコード（fileUploads や uploads など）に合わせてください
-    if (s.path) {
           await slack.files.uploadV2({
             channel_id: SLACK_CHANNEL,
-             thread_ts: post.ts,
-             file_uploads: [
+            thread_ts: process.env.PARENT_THREAD_TS,
+            file_uploads: [
               {
                 file: s.path,
                 filename: path.basename(s.path),
-          }
-        ]
-      });
-    }
+              }
+            ]
+          });
         }
       }
     }
