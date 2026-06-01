@@ -320,13 +320,19 @@ for (const res of hashResults) {
       for (const v of viewports) {
         const s = item.screenshots[v.name];
         if (s.path) {
+    // 変数名は実際のコード（fileUploads や uploads など）に合わせてください
+    if (s.path) {
           await slack.files.uploadV2({
             channel_id: SLACK_CHANNEL,
-            thread_ts: post.ts,
-            file: s.path,
-            filename: `lp_${item.lpIdx}_${v.name}.png`,
-            initial_comment: `LP [${item.lpIdx + 1}] ${v.name} スクリーンショット`,
-          });
+             thread_ts: post.ts,
+             file_uploads: [
+              {
+                file: s.path,
+                filename: path.basename(s.path),
+          }
+        ]
+      });
+    }
         }
       }
     }
