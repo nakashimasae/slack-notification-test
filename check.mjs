@@ -15,12 +15,9 @@ function required(name) {
   return v; 
 } 
 
-// 変数の宣言だけを上で行い、中身の代入は main() の中で行うように変更します
-let LP_URLS = [];
-let BANNER_URLS = [];
-
-const LP_URLS = required('LP_URL').split(',').map(url => url.trim());
-const BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
+// 変数の宣言だけを上で行い、中身の代入は main() の中で行うように変更します 
+let LP_URLS = [ ] ; 
+let BANNER_URLS = [ ] ;
 
 const YOOM_WEBHOOK_URL = process.env.YOOM_WEBHOOK_URL || '';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || '';
