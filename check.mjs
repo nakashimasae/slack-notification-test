@@ -155,11 +155,15 @@ async function main() {
         await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
         await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
 
-        await autoScroll(page);
-        await page.waitForLoadState('networkidle').catch(() => {});
+      await autoScroll(page);
+      await page.waitForLoadState('networkidle').catch(() => {});
 
-        const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
-        await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
+      // 👇 160行目の空行に、以下の2行を差し込みます
+      await page.evaluate(() => document.fonts.ready).catch(() => {});
+      await page.waitForTimeout(2000); // 2秒間待機して描画を安定させる
+
+      const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
+      await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
 
         let screenshotUrl = null;
         if (S3_ENABLED) {
