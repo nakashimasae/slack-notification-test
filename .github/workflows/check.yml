@@ -2,23 +2,29 @@ name: LP Banner Check
 
 on:
   workflow_dispatch:
+    # 🌟 ここを追加：GitHubの画面に入力ボックス（テキスト欄）を作ります
+    inputs:
+      lp_urls:
+        description: 'チェックするLPのURL（カンマ区切りで複数入力可）'
+        required: true
+        type: string
 
 jobs:
   # -----------------------------------------------------------------
-  # 1. カンマ区切りのURL文字列を分解して、JSONの配列形式に変換するジョブ
+  # 1. 画面から入力されたURL文字列を分解して、JSONの配列形式に変換するジョブ
   # -----------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-      thread_ts: ${{ steps.slack-init.outputs.thread_ts }} # 🌟この行が足りていませんでした！
+      thread_ts: ${{ steps.slack-init.outputs.thread_ts }}
     steps:
       - name: Generate URL matrix
         id: set-matrix
         env:
-          RAW_URLS: ${{ secrets.LP_URL }}
+          # 🌟 Secretsからではなく、画面の入力欄（inputs）の値を読み込むように変更
+          RAW_URLS: ${{ github.event.inputs.lp_urls }}
         run: |
-          # カンマ区切りのURLを ["url1", "url2"] のようなJSON配列に安全に変換します
           URLS_JSON=$(node -e "console.log(JSON.stringify(process.env.RAW_URLS.split(',').map(u => u.trim()).filter(Boolean)))")
           echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
 
@@ -40,14 +46,9 @@ jobs:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
-      # ★ここが並列化の核心設定です
       matrix:
         lp_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      
-      # ターゲットサイトへの過度な負荷を防ぐため、同時に動く最大サーバー数を「5台」に制限
       max-parallel: 5 
-      
-      # どこか1つのURLでエラー（バナー未検出など）が起きても、他のURLのチェックを巻き添えで止めない
       fail-fast: false 
 
     steps:
@@ -65,9 +66,7 @@ jobs:
 
       - name: Run check script
         env:
-          # ★ここがポイント！マトリックスから1つのURLだけがスクリプトに渡されます
           LP_URL: ${{ matrix.lp_url }} 
-          # 受け取った親メッセージのIDを環境変数としてスクリプトに渡す
           PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }} 
           BANNER_URL: ${{ secrets.BANNER_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
