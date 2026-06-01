@@ -110,7 +110,6 @@ async function main() {
   await mkdir(TMP_DIR, {recursive: true}); 
   await mkdir('banners', {recursive: true}).catch(() => {}); 
 
-  // 💡 { recursive: true } を追加し、サブフォルダの中身もすべて再帰的に自動取得します
   const files = await readdir('banners', { recursive: true }); 
   const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif']; 
   const bannerFiles = files.filter(f => imageExtensions.includes(path.extname(f).toLowerCase())); 
@@ -129,7 +128,6 @@ async function main() {
     const filename = bannerFiles[i]; 
     const bannerPath = path.join('banners', filename); 
     const bannerHash = await imghash.hash(bannerPath, 8, 'hex'); 
-    // Slackなどの表示にフォルダ名が含まれるようにfilename（相対パス）をそのまま入れます
     banners.push({id: i, url: filename, hash: bannerHash}); 
   } 
 
@@ -146,79 +144,118 @@ async function main() {
   for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
     const lpUrl = LP_URLS[lpIdx]; 
     console.log(`Processing LP [${lpIdx + 1}/${LP_URLS.length}]: ${lpUrl}`); 
-    const results = {PC: {}, SP: {}}; 
-    const screenshots = {PC: {}, SP: {}}; 
 
-    for (const v of viewports) {
-      const ctx = await browser.newContext(v.context); 
-      const page = await ctx.newPage(); 
-      try {
-        await page.goto(lpUrl, {waitUntil: 'load', timeout: 120000}); 
-        await page.addStyleTag({content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }'}).catch(() => {}); 
-        await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {}); 
-        await page.locator('text=×').first().click({timeout: 2000}).catch(() => {}); 
-        await autoScroll(page); 
-        await page.waitForLoadState('networkidle').catch(() => {}); 
-        await page.evaluate(() => document.fonts.ready).catch(() => {}); 
-        await page.waitForTimeout(2000); 
-        const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`); 
-        await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85}); 
-        let screenshotUrl = null; 
-        if (S3_ENABLED) {
-          const ts = new Date().toISOString().replace(/[:.]/g, '-'); 
-          const key = `${S3_PREFIX}${ts}_lp${lpIdx}_${v.name}.jpg`; 
-          screenshotUrl = await uploadToS3(screenshotPath, key); 
-        } 
-        screenshots[v.name] = {path: screenshotPath, url: screenshotUrl}; 
-        const imageSrcs = [ ] ; 
-        for (const frame of page.frames()) {
-          try {
-            const srcs = await frame.evaluate(() => Array.from(document.querySelectorAll('img'))
-              .filter((img) => img.complete && img.naturalWidth > 0)
-              .map((img) => img.currentSrc || img.src)
-              .filter((src) => src && ! src.startsWith('data:'))
-            ); 
-            imageSrcs.push(...srcs); 
-          } catch (e) {} 
-        } 
-        const uniqueSrcs = [...new Set(imageSrcs)]; 
-        const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null})); 
-        const hashResults = await Promise.all(uniqueSrcs.map(async (src) => {
-          try {
-            const h = await hashUrl(src); 
-            return {src, h}; 
-          } catch (e) {
-            return null; 
+    let results = {PC: {}, SP: {}}; 
+    let screenshots = {PC: {}, SP: {}}; 
+    
+    // 💡 リトライ制御用（最大3回スキャンを試みます）
+    const MAX_RETRIES = 3; 
+    
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 1) {
+        console.log(`\n⚠️ PC・SPともに未検出のバナーがあるため、再スキャンを実行します（試行 ${attempt}/${MAX_RETRIES}）`); 
+        // ページ読み込み負荷を考慮し、5秒待機してから開き直す
+        await new Promise(resolve => setTimeout(resolve, 5000)); 
+      }
+
+      results = {PC: {}, SP: {}}; 
+      screenshots = {PC: {}, SP: {}}; 
+
+      for (const v of viewports) {
+        const ctx = await browser.newContext(v.context); 
+        const page = await ctx.newPage(); 
+        try {
+          await page.goto(lpUrl, {waitUntil: 'load', timeout: 120000}); 
+          await page.addStyleTag({content: '[class*="modal"], [class*="popup"], [class*="overlay"], [class*="dialog"] { display: none !important; }'}).catch(() => {}); 
+          await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {}); 
+          await page.locator('text=×').first().click({timeout: 2000}).catch(() => {}); 
+          await autoScroll(page); 
+          await page.waitForLoadState('networkidle').catch(() => {}); 
+          await page.evaluate(() => document.fonts.ready).catch(() => {}); 
+          await page.waitForTimeout(2000); 
+          const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`); 
+          await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85}); 
+          let screenshotUrl = null; 
+          if (S3_ENABLED) {
+            const ts = new Date().toISOString().replace(/[:.]/g, '-'); 
+            const key = `${S3_PREFIX}${ts}_lp${lpIdx}_${v.name}.jpg`; 
+            screenshotUrl = await uploadToS3(screenshotPath, key); 
           } 
-        })); 
-        for (const res of hashResults) {
-          if ( ! res) continue; 
-          for (const b of bannerMatches) {
-            const targetBanner = banners.find(x => x.id === b.id); 
-            const d = hammingHex(targetBanner.hash, res.h); 
-            if (d < b.bestDist) {
-              b.bestDist = d; 
-              b.bestSrc = res.src; 
+          screenshots[v.name] = {path: screenshotPath, url: screenshotUrl}; 
+          const imageSrcs = [ ] ; 
+          for (const frame of page.frames()) {
+            try {
+              const srcs = await frame.evaluate(() => Array.from(document.querySelectorAll('img'))
+                .filter((img) => img.complete && img.naturalWidth > 0)
+                .map((img) => img.currentSrc || img.src)
+                .filter((src) => src && ! src.startsWith('data:'))
+              ); 
+              imageSrcs.push(...srcs); 
+            } catch (e) {} 
+          } 
+          const uniqueSrcs = [...new Set(imageSrcs)]; 
+          const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null})); 
+          const hashResults = await Promise.all(uniqueSrcs.map(async (src) => {
+            try {
+              const h = await hashUrl(src); 
+              return {src, h}; 
+            } catch (e) {
+              return null; 
+            } 
+          })); 
+          for (const res of hashResults) {
+            if ( ! res) continue; 
+            for (const b of bannerMatches) {
+              const targetBanner = banners.find(x => x.id === b.id); 
+              const d = hammingHex(targetBanner.hash, res.h); 
+              if (d < b.bestDist) {
+                b.bestDist = d; 
+                b.bestSrc = res.src; 
+              } 
             } 
           } 
+          for (const b of bannerMatches) {
+            results[v.name][b.id] = {
+              found: b.bestDist <= THRESHOLD, 
+              distance: b.bestDist, 
+              bestSrc: b.bestSrc, 
+            }; 
+          } 
+        } catch (err) {
+          console.error(`Failed to process LP ${lpUrl}:`, err); 
+          for (const b of banners) {
+            results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null}; 
+          } 
+          screenshots[v.name] = {path: null, url: null}; 
+        } finally {
+          await ctx.close(); 
         } 
-        for (const b of bannerMatches) {
-          results[v.name][b.id] = {
-            found: b.bestDist <= THRESHOLD, 
-            distance: b.bestDist, 
-            bestSrc: b.bestSrc, 
-          }; 
-        } 
-      } catch (err) {
-        console.error(`Failed to process LP ${lpUrl}:`, err); 
-        for (const b of banners) {
-          results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null}; 
-        } 
-        screenshots[v.name] = {path: null, url: null}; 
-      } finally {
-        await ctx.close(); 
       } 
-    } 
+
+      // 💡 判定：PC・SPの「両方で未検出」のバナーがあるかチェック
+      let bothMissing = false; 
+      for (const b of banners) {
+        const pcFound = results.PC[b.id]?.found; 
+        const spFound = results.SP[b.id]?.found; 
+        if ( ! pcFound && ! spFound) {
+          bothMissing = true; 
+          console.log(`🔍 未検出バナー検知: 【バナー ${b.id + 1}】(${b.url}) がPC・SPともに見つかりません。`); 
+          break; 
+        } 
+      } 
+
+      // 両方未検出のバナーが1つもなければ、再スキャンを終了して次に進む（出し分けバナーはここでパスされる）
+      if ( ! bothMissing) {
+        break; 
+      } 
+
+      if (attempt < MAX_RETRIES) {
+        console.log(`❌ 試行 ${attempt}: 画面上に存在しないバナーを検知しました。ページを読み直して再スキャンします。`); 
+      } else {
+        console.log(`❌ 最大リトライ回数（${MAX_RETRIES}回）に達しましたが、バナーが検出できませんでした。`); 
+      }
+    }
+
     allResults.push({lpUrl, lpIdx, results, screenshots}); 
   } 
   await browser.close(); 
