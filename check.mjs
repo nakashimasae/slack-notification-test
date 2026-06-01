@@ -186,3 +186,193 @@ async function main() {
               .map((img) => img.currentSrc || img.src)
               .filter((src) => src && !src.startsWith('data:'))
             );
+            imageSrcs.push(...srcs);
+          } catch (e) {}
+        }
+        
+        const uniqueSrcs = [...new Set(imageSrcs)];
+        const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
+
+        const hashResults = await Promise.all(
+          uniqueSrcs.map(async (src) => {
+            try {
+              const h = await hashUrl(src);
+              return { src, h };
+            } catch (e) {
+              return null;
+            }
+          })
+        );
+
+        for (const res of hashResults) {
+          if (!res) continue;
+          for (const b of bannerMatches) {
+            const targetBanner = banners.find(x => x.id === b.id);
+            const d = hammingHex(targetBanner.hash, res.h);
+            if (d < b.bestDist) {
+              b.bestDist = d;
+              b.bestSrc = res.src;
+            }
+          }
+        }
+
+        for (const b of bannerMatches) {
+          results[v.name][b.id] = {
+            found: b.bestDist <= THRESHOLD,
+            distance: b.bestDist,
+            bestSrc: b.bestSrc,
+          };
+        }
+      } catch (err) {
+        console.error(`Failed to process LP ${lpUrl}:`, err);
+        for (const b of banners) {
+          results[v.name][b.id] = { found: false, distance: Infinity, bestSrc: null };
+        }
+        screenshots[v.name] = { path: null, url: null };
+      } finally {
+        await ctx.close();
+      }
+    }
+
+    allResults.push({ lpUrl, lpIdx, results, screenshots });
+  }
+  await browser.close();
+
+  const detailLines = [];
+  allResults.forEach(item => {
+    detailLines.push(`\n🌐 *LP*: ${item.lpUrl}`);
+    banners.forEach(b => {
+      const pcRes = item.results.PC[b.id];
+      const spRes = item.results.SP[b.id];
+      if (!pcRes.found || !spRes.found) totalAllFound = false;
+
+      detailLines.push(`  【バナー ${b.id + 1}】: ${b.url}`);
+      detailLines.push(`    *PC*: ${pcRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${pcRes.distance})`);
+      detailLines.push(`    *SP*: ${spRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${spRes.distance})`);
+    });
+  });
+
+  const headline = totalAllFound ? '✅ すべてのLPで、すべてのバナーが問題なくアップされています' : '⚠️ 一部またはすべてのLP・バナーに問題があります';
+  const detail = [...detailLines, `\n閾値: ${THRESHOLD}`].join('\n');
+
+  console.log('====== 総合判定結果 ======');
+  console.log(headline);
+  console.log(detail);
+  console.log('==========================');
+
+  if (YOOM_WEBHOOK_URL) {
+    const yoomLps = [];
+    for (const item of allResults) {
+      const yoomBanners = [];
+      for (const b of banners) {
+        const buildViewportPayload = async (name) => {
+          const r = item.results[name][b.id];
+          const s = item.screenshots[name];
+          if (!s.path) return { found: false, distance: Infinity };
+          if (S3_ENABLED && s.url) return { found: r.found, distance: r.distance, image_url: s.url };
+          return {
+            found: r.found,
+            distance: r.distance,
+            image_b64: (await readFile(s.path)).toString('base64'),
+            image_filename: path.basename(s.path),
+            image_mime: 'image/jpeg',
+          };
+        };
+
+        yoomBanners.push({
+          url: b.url,
+          pc: await buildViewportPayload('PC'),
+          sp: await buildViewportPayload('SP'),
+        });
+      }
+      yoomLps.push({ lp_url: item.lpUrl, banners: yoomBanners });
+    }
+
+    const payload = { headline, all_found: totalAllFound, threshold: THRESHOLD, lps: yoomLps };
+    const resp = await fetch(YOOM_WEBHOOK_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
+  }
+
+  // 💡 安全なSlack通知処理（防衛ガード付き）
+  if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
+    console.log("📬 Slackへの送信処理を開始します...");
+    try {
+      const slack = new WebClient(SLACK_BOT_TOKEN);
+      
+      // 💡 スレッドTSの厳密なバリデーション（空文字やActionsの構文漏れを弾いてクラッシュを防ぐ）
+      let rawThreadTs = (process.env.PARENT_THREAD_TS || '').trim();
+      let threadTs = (rawThreadTs && !rawThreadTs.includes('${{') && !isNaN(parseFloat(rawThreadTs))) ? rawThreadTs : undefined;
+
+      if (!threadTs && rawThreadTs) {
+        console.log(`⚠️ スレッドID「${rawThreadTs}」の形式が不正なため、スレッド返信ではなく新規メッセージとして投稿します。`);
+      }
+
+      // 1. 結果テキストの投稿
+      await slack.chat.postMessage({
+        channel: SLACK_CHANNEL,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        text: `${headline}\n${detail}`,
+      });
+      console.log("✅ Slackへ結果テキストを送信しました。");
+
+      // 2. キャプチャ画像のアップロード
+      for (const item of allResults) {
+        for (const v of viewports) {
+          const s = item.screenshots[v.name];
+          if (s.path) {
+            await slack.files.uploadV2({
+              channel_id: SLACK_CHANNEL,
+              ...(threadTs ? { thread_ts: threadTs } : {}),
+              file_uploads: [
+                {
+                  file: s.path,
+                  filename: path.basename(s.path),
+                }
+              ]
+            }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
+          }
+        }
+      }
+    } catch (slackError) {
+      console.error("❌ Slackへのメイン送信ブロックでエラーが発生しました:", slackError.message);
+    }
+  } else {
+    console.log("⚠️ SLACK_BOT_TOKEN または SLACK_CHANNEL が未設定のためSlack送信をスキップしました。");
+  }
+
+  if (!totalAllFound) {
+    console.log("⚠️ 検出できなかったバナーがあるため、意図的に exit code 1 で終了します。");
+    process.exit(1);
+  }
+}
+
+main().catch(async (err) => {
+  console.error("🔥 main()内部で予期せぬエラーが発生しました:", err); 
+
+  const token = process.env.SLACK_BOT_TOKEN;
+  const channel = process.env.SLACK_CHANNEL;
+  let rawThreadTs = (process.env.PARENT_THREAD_TS || '').trim();
+  let threadTs = (rawThreadTs && !rawThreadTs.includes('${{') && !isNaN(parseFloat(rawThreadTs))) ? rawThreadTs : undefined;
+  const lpUrl = process.env.LP_URL || "不明なURL";
+  
+  if (token && channel) {
+    try {
+      const { WebClient } = await import('@slack/web-api');
+      const client = new WebClient(token);
+      
+      await client.chat.postMessage({
+        channel: channel,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        text: `❌ *スクリプトが途中で強制中断されました* (${lpUrl})\n*原因*: ${err.message || err}`
+      });
+      console.log("✅ Slackへエラー中断通知を送信しました。");
+    } catch (slackErr) {
+      console.error('❌ エラー通知の送信にも失敗しました:', slackErr.message);
+    }
+  }
+  process.exit(1); 
+});
