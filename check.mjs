@@ -302,11 +302,11 @@ for (const res of hashResults) {
 if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
     const slack = new WebClient(SLACK_BOT_TOKEN);
 
-    // 1. 結果のテキストを親スレッドへ投稿（正しい変数名 resText に修正）
+    // 1. 結果のテキストを親スレッドへ投稿（正しい変数に修正）
     await slack.chat.postMessage({
       channel: SLACK_CHANNEL,
       thread_ts: process.env.PARENT_THREAD_TS,
-      text: resText, // 🌟ここを元の resText に戻します！
+      text: `${headline}\n${detail}`, // 🌟 resText から本来の変数に修正しました！
     });
 
     // 2. キャプチャ画像を親スレッドへアップロード
