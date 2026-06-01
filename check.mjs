@@ -193,21 +193,30 @@ async function main() {
 
         const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
 
-        for (const src of uniqueSrcs) {
-          try {
-            const h = await hashUrl(src);
-            for (const b of bannerMatches) {
-              const targetBanner = banners.find(x => x.id === b.id);
-              const d = hammingHex(targetBanner.hash, h);
-              if (d < b.bestDist) {
-                b.bestDist = d;
-                b.bestSrc = src;
-              }
-            }
-          } catch (e) {
-            // ログのノイズを減らすためサイレントに
-          }
-        }
+// 1. すべての画像のダウンロードとハッシュ化を並列（一斉）で実行
+const hashResults = await Promise.all(
+  uniqueSrcs.map(async (src) => {
+    try {
+      const h = await hashUrl(src);
+      return { src, h };
+    } catch (e) {
+      return null; // エラーになった画像はスキップ
+    }
+  })
+);
+
+// 2. 判定処理（ここはCPUの計算だけなので通常のループで高速に処理）
+for (const res of hashResults) {
+  if (!res) continue;
+  for (const b of bannerMatches) {
+    const targetBanner = banners.find(x => x.id === b.id);
+    const d = hammingHex(targetBanner.hash, res.h);
+    if (d < b.bestDist) {
+      b.bestDist = d;
+      b.bestSrc = res.src;
+    }
+  }
+}
 
         for (const b of bannerMatches) {
           results[v.name][b.id] = {
