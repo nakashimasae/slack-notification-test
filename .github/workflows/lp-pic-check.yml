@@ -14,7 +14,9 @@ jobs:
       - name: 画像チェック処理の実行
         id: checker
         run: |
-          # Yoomから渡されたデータは ${{ github.event.client_payload.キー名 }} で取得できます
+          # 【修正例】記号を外して普通のテキストにする
+          # Yoomから渡されたデータは client_payload のキー名で取得できます
+          
           LP_URL="${{ github.event.client_payload.lp_url }}"
           BANNER_URL="${{ github.event.client_payload.banner_url }}"
           
