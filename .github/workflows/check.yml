@@ -54,6 +54,10 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # 👇 ここを追加して、ブラウザと必要なシステムライブラリを強制インストールします
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+        
       - name: Run check script
         env:
           LP_URL: ${{ matrix.lp_url }}
