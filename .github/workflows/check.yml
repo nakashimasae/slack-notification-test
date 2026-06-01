@@ -2,7 +2,6 @@ name: LP Banner Check
 
 on:
   workflow_dispatch:
-    # 🌟 ここを追加：GitHubの画面に入力ボックス（テキスト欄）を作ります
     inputs:
       lp_urls:
         description: 'チェックするLPのURL（カンマ区切りで複数入力可）'
@@ -10,9 +9,6 @@ on:
         type: string
 
 jobs:
-  # -----------------------------------------------------------------
-  # 1. 画面から入力されたURL文字列を分解して、JSONの配列形式に変換するジョブ
-  # -----------------------------------------------------------------
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -22,13 +18,11 @@ jobs:
       - name: Generate URL matrix
         id: set-matrix
         env:
-          # 🌟 Secretsからではなく、画面の入力欄（inputs）の値を読み込むように変更
           RAW_URLS: ${{ github.event.inputs.lp_urls }}
         run: |
           URLS_JSON=$(node -e "console.log(JSON.stringify(process.env.RAW_URLS.split(',').map(u => u.trim()).filter(Boolean)))")
           echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
 
-      # 最初に1通だけ親メッセージを投稿してID（ts）を記憶する
       - name: Create Parent Slack Message
         id: slack-init
         run: |
@@ -39,17 +33,14 @@ jobs:
           TS=$(echo $RES | jq -r '.ts')
           echo "thread_ts=${TS}" >> $GITHUB_OUTPUT
 
-  # -----------------------------------------------------------------
-  # 2. 分解したURLの数だけ、並列でチェックを実行するジョブ
-  # -----------------------------------------------------------------
   check:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       matrix:
         lp_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      max-parallel: 5 
-      fail-fast: false 
+      max-parallel: 5
+      fail-fast: false
 
     steps:
       - name: Checkout code
@@ -65,8 +56,8 @@ jobs:
 
       - name: Run check script
         env:
-          LP_URL: ${{ matrix.lp_url }} 
-          PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }} 
+          LP_URL: ${{ matrix.lp_url }}
+          PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }}
           BANNER_URL: ${{ secrets.BANNER_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
