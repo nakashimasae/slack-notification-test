@@ -2,7 +2,7 @@ import { chromium, devices } from 'playwright';
 import imghash from 'imghash';
 import { WebClient } from '@slack/web-api';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
-import { mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, rm, readdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
@@ -106,29 +106,37 @@ async function uploadToS3(filepath, key) {
 }
 
 async function main() {
+  // LP_URLだけを必須とし、BANNER_URLのチェックは不要にします
   LP_URLS = required('LP_URL').split(',').map(url => url.trim());
-  BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
 
   await mkdir(OUT_DIR, { recursive: true }); 
   await mkdir(TMP_DIR, { recursive: true });
+  // bannersフォルダがなければ自動作成します
+  await mkdir('banners', { recursive: true }).catch(() => {});
   
+  // bannersフォルダの中にある画像ファイルを自動取得
+  const files = await readdir('banners');
+  const imageExtensions = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+  const bannerFiles = files.filter(f => imageExtensions.includes(path.extname(f).toLowerCase()));
+
   // ⚙️ 状況を100%可視化するログ
   console.log("=========================================");
   console.log(`🚀 ターゲットLP:`, LP_URLS);
-  console.log(`🚀 照合バナー数: ${BANNER_URLS.length}件`);
+  console.log(`🚀 検出したGitHub上のバナー数: ${bannerFiles.length}件`);
   console.log("====== [DEBUG] Slack 環境変数確認 ======");
   console.log("SLACK_BOT_TOKENが存在するか:", SLACK_BOT_TOKEN ? "✅ YES" : "❌ NO (空っぽ)");
   console.log("SLACK_CHANNELが存在するか:", SLACK_CHANNEL ? `✅ YES (${SLACK_CHANNEL})` : "❌ NO (空っぽ)");
-  console.log("PARENT_THREAD_TSの値:", process.env.PARENT_THREAD_TS ? `「${process.env.PARENT_THREAD_TS}」` : "❌ 空っぽ（または未設定）");
+  console.log("PARENT_THREAD_TSの値:", process.env.PARENT_THREAD_TS ? `「${process.env.PARENT_THREAD_TS}」` : "❌ 空っぽ");
   console.log("=========================================");
 
+  // GitHub上にアップロードされた画像を直接ハッシュ化して配列に入れます
   const banners = [];
-  for (let i = 0; i < BANNER_URLS.length; i++) {
-    const url = BANNER_URLS[i];
-    const bannerPath = path.join(OUT_DIR, `banner_input_${i}.png`);
-    await downloadToFile(url, bannerPath);
+  for (let i = 0; i < bannerFiles.length; i++) {
+    const filename = bannerFiles[i];
+    const bannerPath = path.join('banners', filename);
     const bannerHash = await imghash.hash(bannerPath, 8, 'hex');
-    banners.push({ id: i, url, hash: bannerHash });
+    // 後続処理（Slack表示など）のためにurlプロパティにファイル名を代入しておきます
+    banners.push({ id: i, url: filename, hash: bannerHash });
   }
 
   const browser = await chromium.launch({
