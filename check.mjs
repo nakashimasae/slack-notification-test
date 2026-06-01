@@ -341,25 +341,32 @@ if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
 }
 
 main().catch(async (err) => {
-  console.error(err); 
-  
-  // 💡 起動エラーや処理中のエラーをキャッチして、Slackのスレッドに原因を書き込みます
+  console.error("エラーが発生しました:", err); 
+
+  // 💡 環境変数からSlack通知に必要な情報を集めます
   const token = process.env.SLACK_BOT_TOKEN;
   const channel = process.env.SLACK_CHANNEL;
   const threadTs = process.env.PARENT_THREAD_TS;
+  const lpUrl = process.env.LP_URL || "不明なURL";
   
   if (token && channel) {
     try {
-      const slack = new WebClient(token);
-      await slack.chat.postMessage({
+      // 安全のため、Slackのクライアントをここで読み込んで送信します
+      const { WebClient } = await import('@slack/web-api');
+      const client = new WebClient(token);
+      
+      // 💡 エラー内容をSlackのスレッドに書き込みます
+      await client.chat.postMessage({
         channel: channel,
         thread_ts: threadTs,
-        text: `❌ エラーが発生したため処理を中断しました。\n*原因*: ${err.message}`
+        text: `❌ *チェック失敗* (${lpUrl})\n*原因*: ${err.message || err}`
       });
+      console.log("Slackへエラー通知を送信しました。");
     } catch (slackErr) {
-      console.error('Slackへのエラー通知に失敗しました:', slackErr);
+      console.error('Slackへのエラー通知中にさらにエラーが発生しました:', slackErr);
     }
   }
   
-  process.exit(2); 
+  // GitHub Actions側には「失敗」として伝えるために 1 で終了します
+  process.exit(1); 
 });
