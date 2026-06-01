@@ -116,6 +116,13 @@ async function main() {
   
   console.log(`LPs:`, LP_URLS);
   console.log(`Banners:`, BANNER_URLS);
+  
+  // ⚙️ デバッグ用：環境変数が本当に届いているか確認するログ
+  console.log("====== Slack Env Debug ======");
+  console.log("SLACK_BOT_TOKENが届いているか:", !!SLACK_BOT_TOKEN);
+  console.log("SLACK_CHANNELが届いているか:", !!SLACK_CHANNEL);
+  console.log("PARENT_THREAD_TSの値:", process.env.PARENT_THREAD_TS);
+  console.log("=============================");
 
   const banners = [];
   for (let i = 0; i < BANNER_URLS.length; i++) {
