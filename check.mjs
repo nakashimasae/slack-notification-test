@@ -9,13 +9,12 @@ import path from 'node:path';
 function required(name) {
   const v = process.env[name]; 
   if (!v) {
-    // 💡 即座に終了させず、エラーを発生させて後ろの main().catch で捕まえるようにします
     throw new Error(`必要な環境変数 [${name}] が設定されていません。`); 
   } 
   return v; 
 } 
 
-// 変数の宣言だけを上で行い、中身の代入は main() の中で行うように変更します 
+// 変数の宣言
 let LP_URLS = [ ] ; 
 let BANNER_URLS = [ ] ;
 
@@ -82,7 +81,7 @@ async function hashUrl(url) {
   try {
     await downloadToFile(url, tmpPath);
     return await imghash.hash(tmpPath, 8, 'hex');
-  } // エラーログを詳細に出力するように変更
+  }
   catch (e) {
     throw new Error(`Download or Hash failed: ${e.message}`);
   } finally {
@@ -107,22 +106,21 @@ async function uploadToS3(filepath, key) {
 }
 
 async function main() {
-  // 💡 main関数の先頭で、環境変数のチェックと切り分けを実行します
   LP_URLS = required('LP_URL').split(',').map(url => url.trim());
   BANNER_URLS = required('BANNER_URL').split(',').map(url => url.trim());
 
   await mkdir(OUT_DIR, { recursive: true }); 
   await mkdir(TMP_DIR, { recursive: true });
   
-  console.log(`LPs:`, LP_URLS);
-  console.log(`Banners:`, BANNER_URLS);
-  
-  // ⚙️ デバッグ用：環境変数が本当に届いているか確認するログ
-  console.log("====== Slack Env Debug ======");
-  console.log("SLACK_BOT_TOKENが届いているか:", !!SLACK_BOT_TOKEN);
-  console.log("SLACK_CHANNELが届いているか:", !!SLACK_CHANNEL);
-  console.log("PARENT_THREAD_TSの値:", process.env.PARENT_THREAD_TS);
-  console.log("=============================");
+  // ⚙️ 状況を100%可視化するログ
+  console.log("=========================================");
+  console.log(`🚀 ターゲットLP:`, LP_URLS);
+  console.log(`🚀 照合バナー数: ${BANNER_URLS.length}件`);
+  console.log("====== [DEBUG] Slack 環境変数確認 ======");
+  console.log("SLACK_BOT_TOKENが存在するか:", SLACK_BOT_TOKEN ? "✅ YES" : "❌ NO (空っぽ)");
+  console.log("SLACK_CHANNELが存在するか:", SLACK_CHANNEL ? `✅ YES (${SLACK_CHANNEL})` : "❌ NO (空っぽ)");
+  console.log("PARENT_THREAD_TSの値:", process.env.PARENT_THREAD_TS ? `「${process.env.PARENT_THREAD_TS}」` : "❌ 空っぽ（または未設定）");
+  console.log("=========================================");
 
   const banners = [];
   for (let i = 0; i < BANNER_URLS.length; i++) {
@@ -133,7 +131,6 @@ async function main() {
     banners.push({ id: i, url, hash: bannerHash });
   }
 
-  // ⭐ セキュリティ制限を解除してブラウザを起動するよう修正
   const browser = await chromium.launch({
     args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process']
   });
@@ -148,15 +145,12 @@ async function main() {
 
   for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
     const lpUrl = LP_URLS[lpIdx];
-    console.log(`\n=========================================`);
     console.log(`Processing LP [${lpIdx + 1}/${LP_URLS.length}]: ${lpUrl}`);
-    console.log(`=========================================`);
 
     const results = { PC: {}, SP: {} };
     const screenshots = { PC: {}, SP: {} };
 
     for (const v of viewports) {
-      console.log(`--- ${v.name} ---`);
       const ctx = await browser.newContext(v.context);
       const page = await ctx.newPage();
 
@@ -167,15 +161,14 @@ async function main() {
         await page.locator('text=閉じる').first().click({ timeout: 2000 }).catch(() => {});
         await page.locator('text=×').first().click({ timeout: 2000 }).catch(() => {});
 
-      await autoScroll(page);
-      await page.waitForLoadState('networkidle').catch(() => {});
+        await autoScroll(page);
+        await page.waitForLoadState('networkidle').catch(() => {});
 
-      // 👇 160行目の空行に、以下の2行を差し込みます
-      await page.evaluate(() => document.fonts.ready).catch(() => {});
-      await page.waitForTimeout(2000); // 2秒間待機して描画を安定させる
+        await page.evaluate(() => document.fonts.ready).catch(() => {});
+        await page.waitForTimeout(2000);
 
-      const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
-      await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
+        const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
+        await page.screenshot({ path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85 });
 
         let screenshotUrl = null;
         if (S3_ENABLED) {
@@ -185,7 +178,6 @@ async function main() {
         }
         screenshots[v.name] = { path: screenshotPath, url: screenshotUrl };
 
-        // ⭐ 親画面だけでなく、すべての iframe 内の画像もかき集めるようにループ処理を拡張
         const imageSrcs = [];
         for (const frame of page.frames()) {
           try {
@@ -194,183 +186,3 @@ async function main() {
               .map((img) => img.currentSrc || img.src)
               .filter((src) => src && !src.startsWith('data:'))
             );
-            imageSrcs.push(...srcs);
-          } catch (e) {
-            // クロスドメインの制約等で取得できないフレームはスキップ
-          }
-        }
-        
-        const uniqueSrcs = [...new Set(imageSrcs)];
-        console.log(`Found ${uniqueSrcs.length} loaded images (including iframes)`);
-
-        const bannerMatches = banners.map(b => ({ id: b.id, bestDist: Infinity, bestSrc: null }));
-
-// 1. すべての画像のダウンロードとハッシュ化を並列（一斉）で実行
-const hashResults = await Promise.all(
-  uniqueSrcs.map(async (src) => {
-    try {
-      const h = await hashUrl(src);
-      return { src, h };
-    } catch (e) {
-      return null; // エラーになった画像はスキップ
-    }
-  })
-);
-
-// 2. 判定処理（ここはCPUの計算だけなので通常のループで高速に処理）
-for (const res of hashResults) {
-  if (!res) continue;
-  for (const b of bannerMatches) {
-    const targetBanner = banners.find(x => x.id === b.id);
-    const d = hammingHex(targetBanner.hash, res.h);
-    if (d < b.bestDist) {
-      b.bestDist = d;
-      b.bestSrc = res.src;
-    }
-  }
-}
-
-        for (const b of bannerMatches) {
-          results[v.name][b.id] = {
-            found: b.bestDist <= THRESHOLD,
-            distance: b.bestDist,
-            bestSrc: b.bestSrc,
-          };
-        }
-      } catch (err) {
-        console.error(`Failed to process LP ${lpUrl}:`, err);
-        for (const b of banners) {
-          results[v.name][b.id] = { found: false, distance: Infinity, bestSrc: null };
-        }
-        screenshots[v.name] = { path: null, url: null };
-      } finally {
-        await ctx.close();
-      }
-    }
-
-    allResults.push({ lpUrl, lpIdx, results, screenshots });
-  }
-  await browser.close();
-
-  const detailLines = [];
-  allResults.forEach(item => {
-    detailLines.push(`\n🌐 *LP*: ${item.lpUrl}`);
-    banners.forEach(b => {
-      const pcRes = item.results.PC[b.id];
-      const spRes = item.results.SP[b.id];
-      if (!pcRes.found || !spRes.found) totalAllFound = false;
-
-      detailLines.push(`  【バナー ${b.id + 1}】: ${b.url}`);
-      detailLines.push(`    *PC*: ${pcRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${pcRes.distance})`);
-      detailLines.push(`    *SP*: ${spRes.found ? '✅ 検出' : '❌ 未検出'} (距離 ${spRes.distance})`);
-    });
-  });
-
-  const headline = totalAllFound ? '✅ すべてのLPで、すべてのバナーが問題なくアップされています' : '⚠️ 一部またはすべてのLP・バナーに問題があります';
-  const detail = [...detailLines, `\n閾値: ${THRESHOLD}`].join('\n');
-
-  console.log('====== 総合判定結果 ======');
-  console.log(headline);
-  console.log(detail);
-  console.log('==========================');
-
-  if (YOOM_WEBHOOK_URL) {
-    const yoomLps = [];
-    for (const item of allResults) {
-      const yoomBanners = [];
-      for (const b of banners) {
-        const buildViewportPayload = async (name) => {
-          const r = item.results[name][b.id];
-          const s = item.screenshots[name];
-          if (!s.path) return { found: false, distance: Infinity };
-          if (S3_ENABLED && s.url) return { found: r.found, distance: r.distance, image_url: s.url };
-          return {
-            found: r.found,
-            distance: r.distance,
-            image_b64: (await readFile(s.path)).toString('base64'),
-            image_filename: path.basename(s.path),
-            image_mime: 'image/jpeg',
-          };
-        };
-
-        yoomBanners.push({
-          url: b.url,
-          pc: await buildViewportPayload('PC'),
-          sp: await buildViewportPayload('SP'),
-        });
-      }
-      yoomLps.push({ lp_url: item.lpUrl, banners: yoomBanners });
-    }
-
-    const payload = { headline, all_found: totalAllFound, threshold: THRESHOLD, lps: yoomLps };
-    const resp = await fetch(YOOM_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) console.error(`Yoom webhook failed: HTTP ${resp.status}`);
-  }
-
-if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
-    const slack = new WebClient(SLACK_BOT_TOKEN);
-
-    // 1. 結果のテキストを親スレッドへ投稿（正しい変数に修正）
-    await slack.chat.postMessage({
-      channel: SLACK_CHANNEL,
-      thread_ts: process.env.PARENT_THREAD_TS,
-      text: `${headline}\n${detail}`, // 🌟 resText から本来の変数に修正しました！
-    });
-
-    // 2. キャプチャ画像を親スレッドへアップロード
-    for (const item of allResults) {
-      for (const v of viewports) {
-        const s = item.screenshots[v.name];
-        if (s.path) {
-          await slack.files.uploadV2({
-            channel_id: SLACK_CHANNEL,
-            thread_ts: process.env.PARENT_THREAD_TS,
-            file_uploads: [
-              {
-                file: s.path,
-                filename: path.basename(s.path),
-              }
-            ]
-          });
-        }
-      }
-    }
-  }
-
-  if (!totalAllFound) process.exit(1);
-}
-
-main().catch(async (err) => {
-  console.error("エラーが発生しました:", err); 
-
-  // 💡 環境変数からSlack通知に必要な情報を集めます
-  const token = process.env.SLACK_BOT_TOKEN;
-  const channel = process.env.SLACK_CHANNEL;
-  const threadTs = process.env.PARENT_THREAD_TS;
-  const lpUrl = process.env.LP_URL || "不明なURL";
-  
-  if (token && channel) {
-    try {
-      // 安全のため、Slackのクライアントをここで読み込んで送信します
-      const { WebClient } = await import('@slack/web-api');
-      const client = new WebClient(token);
-      
-      // 💡 エラー内容をSlackのスレッドに書き込みます
-      await client.chat.postMessage({
-        channel: channel,
-        thread_ts: threadTs,
-        text: `❌ *チェック失敗* (${lpUrl})\n*原因*: ${err.message || err}`
-      });
-      console.log("Slackへエラー通知を送信しました。");
-    } catch (slackErr) {
-      console.error('Slackへのエラー通知中にさらにエラーが発生しました:', slackErr);
-    }
-  }
-  
-  // GitHub Actions側には「失敗」として伝えるために 1 で終了します
-  process.exit(1); 
-});
