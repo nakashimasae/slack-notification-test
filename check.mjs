@@ -61,7 +61,7 @@ async function autoScroll(page) {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
       let total = 0;
-      const step = 200;
+      const step = 300;
       const timer = setInterval(() => {
         window.scrollBy(0, step);
         total += step;
@@ -69,12 +69,12 @@ async function autoScroll(page) {
           clearInterval(timer);
           resolve(undefined);
         }
-      }, 80);
+      }, 50);
     });
   });
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(800);
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(300);
 }
 
 // モーダル・ポップアップ等を隠す。
@@ -159,8 +159,45 @@ async function collectImageSrcs(page) {
   return [...new Set(imageSrcs)];
 }
 
+// サイズ(px)ごとにバナーをグルーピングする。
+// 例：728x90が2種類ある場合、1つのスロットに対して同時に表示されるのはどちらか1つだけのはず。
+// なので「サイズ」を1スロットとみなし、そのスロットで最もハッシュ距離が近い(=一致度が高い)
+// バナーだけを「実際に掲載されている1つ」として確定させる。
+function groupBannersBySize(banners) {
+  const groups = new Map();
+  for (const b of banners) {
+    const key = `${b.width}x${b.height}`;
+    if ( ! groups.has(key)) {
+      groups.set(key, {sizeKey: key, device: b.device, members: [ ]});
+    }
+    groups.get(key).members.push(b);
+  }
+  return [...groups.values()];
+}
+
+// あるビューポート(PC/SP)の結果の中から、各サイズグループにつき「最有力の1つ」を選ぶ
+function pickWinnersForViewport(groups, viewportResults, deviceName) {
+  const winners = [ ];
+  for (const g of groups) {
+    // このビューポートに関係ないグループはスキップ（PC専用サイズはSP側では見ない、等）
+    if (g.device !== 'UNKNOWN' && g.device !== deviceName) continue;
+
+    let best = null;
+    for (const b of g.members) {
+      const r = viewportResults[b.id];
+      if ( ! r || ! r.found) continue;
+      if ( ! best || r.distance < best.distance) {
+        best = {banner: b, distance: r.distance, bestSrc: r.bestSrc};
+      }
+    }
+    winners.push({sizeKey: g.sizeKey, device: g.device, winner: best});
+  }
+  return winners;
+}
+
 async function main() {
-  LP_URLS = required('LP_URL').split(',').map(url => url.trim());
+  const rawLpUrl = required('LP_URL');
+  LP_URLS = rawLpUrl.split(',').map(url => url.trim()).filter(Boolean);
   await mkdir(OUT_DIR, {recursive: true});
   await mkdir(TMP_DIR, {recursive: true});
   await mkdir('banners', {recursive: true}).catch(() => {});
@@ -205,6 +242,9 @@ async function main() {
     banners.push({id: i, url: filename, hash: bannerHash, width, height, device});
   }
 
+  const bannerGroups = groupBannersBySize(banners);
+  console.log(`🗂️ サイズ別スロット数: ${bannerGroups.length}件（同一サイズに複数バナーがある場合は最有力の1つを採用します）`);
+
   const browser = await chromium.launch({
     args: ['--disable-features=IsolateOrigins,site-per-process']
   });
@@ -223,21 +263,24 @@ async function main() {
     let screenshots = {PC: {}, SP: {}};
     let navError = {PC: false, SP: false};
 
-    // 💡 リトライ制御用（最大3回スキャンを試みます）
-    const MAX_RETRIES = 3;
+    // 💡 リトライ制御用（最大2回スキャンを試みます）
+    // 「特定のバナーが1つでも欠けている」ことをリトライ条件にすると、
+    // トリガー次第で正常に非表示のバナーがあるたびに毎回リトライしてしまい時間がかかるため、
+    // 「そのページで“1件もバナーが検出できなかった”＝読み込みタイミングの問題の可能性が高い」場合のみ再試行する。
+    const MAX_RETRIES = 2;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 1) {
-        console.log(`\n⚠️ 該当デバイスで想定バナーが未検出のため、再スキャンを実行します（試行 ${attempt}/${MAX_RETRIES}）`);
-        // ページ読み込み負荷を考慮し、5秒待機してから開き直す
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        console.log(`\n⚠️ バナーが1件も検出できなかったため、再スキャンを実行します（試行 ${attempt}/${MAX_RETRIES}）`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
       }
 
       results = {PC: {}, SP: {}};
       screenshots = {PC: {}, SP: {}};
       navError = {PC: false, SP: false};
 
-      for (const v of viewports) {
+      // 🚀 PC/SPのキャプチャは互いに独立しているため並列実行して時間を短縮する
+      await Promise.all(viewports.map(async (v) => {
         const ctx = await browser.newContext(v.context);
         const page = await ctx.newPage();
         try {
@@ -248,7 +291,7 @@ async function main() {
           await autoScroll(page);
           await page.waitForLoadState('networkidle').catch(() => {});
           await page.evaluate(() => document.fonts.ready).catch(() => {});
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(1000);
           const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
           await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85});
           let screenshotUrl = null;
@@ -297,46 +340,36 @@ async function main() {
         } finally {
           await ctx.close();
         }
-      }
+      }));
 
-      // 💡 再スキャン判定：そのバナーの「想定デバイス」側で未検出のものがあるかだけをチェックする。
-      // （例：SP専用バナーがPCで見つからなくても異常ではないため対象にしない）
-      let shouldRetry = false;
-      for (const b of banners) {
-        const pcFound = results.PC[b.id]?.found;
-        const spFound = results.SP[b.id]?.found;
-        if (b.device === 'PC' && ! pcFound) {
-          shouldRetry = true;
-          console.log(`🔍 未検出バナー検知: 【${b.url}】(PC想定) がPC画面で見つかりません。`);
-        } else if (b.device === 'SP' && ! spFound) {
-          shouldRetry = true;
-          console.log(`🔍 未検出バナー検知: 【${b.url}】(SP想定) がSP画面で見つかりません。`);
-        } else if (b.device === 'UNKNOWN' && ! pcFound && ! spFound) {
-          shouldRetry = true;
-          console.log(`🔍 未検出バナー検知: 【${b.url}】(サイズ不明) がPC・SPともに見つかりません。`);
-        }
-      }
+      // 💡 再スキャン判定：PC・SP合わせて1件も検出できなかった場合のみ再試行する
+      const totalFound = banners.filter(b => results.PC[b.id]?.found || results.SP[b.id]?.found).length;
+      const shouldRetry = totalFound === 0 && ! navError.PC && ! navError.SP;
 
-      if ( ! shouldRetry || navError.PC || navError.SP) {
-        // ナビゲーション自体が失敗した場合はリトライしても解決しないためループを抜ける
+      if ( ! shouldRetry) {
         break;
       }
 
       if (attempt < MAX_RETRIES) {
-        console.log(`❌ 試行 ${attempt}: 想定デバイス側でバナー未検出のため、ページを読み直して再スキャンします。`);
+        console.log(`❌ 試行 ${attempt}: バナーが1件も検出できなかったため、ページを読み直して再スキャンします。`);
       } else {
         console.log(`❌ 最大リトライ回数（${MAX_RETRIES}回）に達しました。以降は検出結果をそのまま報告します。`);
       }
     }
 
     if (navError.PC || navError.SP) hasTechnicalError = true;
-    allResults.push({lpUrl, lpIdx, results, screenshots, navError});
+
+    // サイズグループごとに「実際に掲載されている1つ」を確定する
+    const winnersPC = pickWinnersForViewport(bannerGroups, results.PC, 'PC');
+    const winnersSP = pickWinnersForViewport(bannerGroups, results.SP, 'SP');
+
+    allResults.push({lpUrl, lpIdx, results, screenshots, navError, winnersPC, winnersSP});
   }
   await browser.close();
 
   // ====== レポート生成 ======
   // 注意：トリガーによって表示バナーが変わる仕様のため、「未検出」を一律で異常扱いにしない。
-  // あくまで「どのバナーがどちらの画面で検出されたか」を事実として報告する。
+  // サイズ(スロット)ごとに「どのバナーが実際に掲載されているか」を報告する。
   const detailLines = [ ];
   allResults.forEach(item => {
     detailLines.push(`\n🌐 *LP*: ${item.lpUrl}`);
@@ -345,25 +378,24 @@ async function main() {
       detailLines.push(`  🔥 *取得エラー*: ${item.navError.PC ? 'PC ' : ''}${item.navError.SP ? 'SP' : ''} の画面取得に失敗しました。`);
     }
 
-    const foundPC = banners.filter(b => item.results.PC[b.id]?.found);
-    const foundSP = banners.filter(b => item.results.SP[b.id]?.found);
-    detailLines.push(`  🖥️ *PCで検出*: ${foundPC.length ? foundPC.map(b => `${b.url}(${b.width}x${b.height})`).join(', ') : 'なし'}`);
-    detailLines.push(`  📱 *SPで検出*: ${foundSP.length ? foundSP.map(b => `${b.url}(${b.width}x${b.height})`).join(', ') : 'なし'}`);
+    detailLines.push(`  🖥️ *PC掲載バナー*`);
+    item.winnersPC.forEach(w => {
+      detailLines.push(w.winner
+        ? `    ・${w.sizeKey}: 【${w.winner.banner.url}】(距離${w.winner.distance})`
+        : `    ・${w.sizeKey}: 掲載なし`);
+    });
 
-    detailLines.push(`  --- バナー別詳細 ---`);
-    banners.forEach(b => {
-      const pcRes = item.results.PC[b.id];
-      const spRes = item.results.SP[b.id];
-      const pcLabel = b.device === 'SP' ? '─(対象外)' : (pcRes?.found ? `✅検出 (距離${pcRes.distance})` : `❌未検出 (距離${pcRes?.distance ?? '-'})`);
-      const spLabel = b.device === 'PC' ? '─(対象外)' : (spRes?.found ? `✅検出 (距離${spRes.distance})` : `❌未検出 (距離${spRes?.distance ?? '-'})`);
-      detailLines.push(`  【${b.url}】 ${b.width}x${b.height} / ${b.device}想定`);
-      detailLines.push(`    PC: ${pcLabel}   SP: ${spLabel}`);
+    detailLines.push(`  📱 *SP掲載バナー*`);
+    item.winnersSP.forEach(w => {
+      detailLines.push(w.winner
+        ? `    ・${w.sizeKey}: 【${w.winner.banner.url}】(距離${w.winner.distance})`
+        : `    ・${w.sizeKey}: 掲載なし`);
     });
   });
 
   const headline = hasTechnicalError
     ? '⚠️ 一部LPの画面取得でエラーが発生しました（下記詳細を確認してください）'
-    : '📊 LPバナー掲載チェック結果（トリガーにより表示バナーは変動するため、未検出は必ずしも異常ではありません）';
+    : '📊 LPバナー掲載チェック結果（トリガーにより表示バナーは変動するため、掲載なし表記は必ずしも異常ではありません）';
   const detail = [...detailLines, `\n閾値: ${THRESHOLD}`].join('\n');
 
   console.log('====== 総合判定結果 ======');
@@ -386,18 +418,16 @@ async function main() {
         text: `${headline}\n${detail}`,
       });
       console.log("✅ Slackへ結果テキストを送信しました。");
-      for (const item of allResults) {
-        for (const v of viewports) {
-          const s = item.screenshots[v.name];
-          if (s.path) {
-            await slack.files.uploadV2({
-              channel_id: SLACK_CHANNEL,
-              ...(threadTs ? {thread_ts: threadTs} : {}),
-              file_uploads: [{file: s.path, filename: path.basename(s.path)}]
-            }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
-          }
-        }
-      }
+      // 🚀 PC/SPの画像アップロードも並列化して時間を短縮する
+      await Promise.all(allResults.flatMap(item => viewports.map(async (v) => {
+        const s = item.screenshots[v.name];
+        if ( ! s.path) return;
+        await slack.files.uploadV2({
+          channel_id: SLACK_CHANNEL,
+          ...(threadTs ? {thread_ts: threadTs} : {}),
+          file_uploads: [{file: s.path, filename: path.basename(s.path)}]
+        }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
+      })));
     } catch (slackError) {
       console.error("❌ Slackへのメイン送信ブロックでエラーが発生しました:", slackError.message);
     }
