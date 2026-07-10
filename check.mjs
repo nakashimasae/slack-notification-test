@@ -284,7 +284,10 @@ async function main() {
         const ctx = await browser.newContext(v.context);
         const page = await ctx.newPage();
         try {
-          await page.goto(lpUrl, {waitUntil: 'load', timeout: 120000});
+          // 'load' は広告タグ等の外部リソース全ての完了を待つため、
+          // 1つでも遅延・ハングするとタイムアウトしやすい。
+          // 'domcontentloaded' + 後続のスクロール/networkidle待ちで十分描画は待てるため、こちらに変更。
+          await page.goto(lpUrl, {waitUntil: 'domcontentloaded', timeout: 150000});
           await hideOverlays(page);
           await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {});
           await page.locator('text=×').first().click({timeout: 2000}).catch(() => {});
@@ -379,18 +382,20 @@ async function main() {
       detailLines.push(`  🔥 *取得エラー*: ${item.navError.PC ? 'PC ' : ''}${item.navError.SP ? 'SP' : ''} の画面取得に失敗しました。`);
     }
 
-    detailLines.push(`  🖥️ *PC掲載バナー*`);
+    detailLines.push(`  🖥️ *PC掲載バナー*${item.navError.PC ? '（⚠️取得失敗のため未確認）' : ''}`);
     item.winnersPC.forEach(w => {
-      detailLines.push(w.winner
-        ? `    ・${w.sizeKey}: 【${w.winner.banner.url}】(距離${w.winner.distance})`
-        : `    ・${w.sizeKey}: 掲載なし`);
+      const label = item.navError.PC
+        ? '取得失敗のため未確認'
+        : (w.winner ? `【${w.winner.banner.url}】(距離${w.winner.distance})` : '掲載なし');
+      detailLines.push(`    ・${w.sizeKey}: ${label}`);
     });
 
-    detailLines.push(`  📱 *SP掲載バナー*`);
+    detailLines.push(`  📱 *SP掲載バナー*${item.navError.SP ? '（⚠️取得失敗のため未確認）' : ''}`);
     item.winnersSP.forEach(w => {
-      detailLines.push(w.winner
-        ? `    ・${w.sizeKey}: 【${w.winner.banner.url}】(距離${w.winner.distance})`
-        : `    ・${w.sizeKey}: 掲載なし`);
+      const label = item.navError.SP
+        ? '取得失敗のため未確認'
+        : (w.winner ? `【${w.winner.banner.url}】(距離${w.winner.distance})` : '掲載なし');
+      detailLines.push(`    ・${w.sizeKey}: ${label}`);
     });
   });
 
