@@ -1,0 +1,15 @@
+# LPバナーチェック対象URL一覧
+#
+# workflow_dispatch実行時の「lp_urls」入力欄が空欄だった場合、このファイルが参照されます。
+# （入力欄に直接URLを入力した場合は、そちらが優先され、このファイルは使われません）
+#
+# 書き方:
+#   ・1行に1つのURLを記載してください
+#   ・「#」で始まる行は無視されます（コメント用）
+#   ・空行は無視されます
+#
+# 例:
+# https://example.com/lp-a
+# https://example.com/lp-b
+
+https://medicalnote.jp/diseases/マントル細胞リンパ腫
