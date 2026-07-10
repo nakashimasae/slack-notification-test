@@ -12,4 +12,4 @@
 # https://example.com/lp-a
 # https://example.com/lp-b
 
-https://medicalnote.jp/diseases/マントル細胞リンパ腫
+https://medicalnote.jp/contents/150917-000013-AOETAE
