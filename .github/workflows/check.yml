@@ -1,5 +1,9 @@
 name: LP Banner Check
 
+env:
+  # 同時実行数（Slackの親メッセージと check ジョブの max-parallel の両方でここを参照する）
+  CONCURRENCY: 5
+
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      count: ${{ steps.set-matrix.outputs.count }}
       thread_ts: ${{ steps.slack-init.outputs.thread_ts }}
     steps:
       - name: Checkout code
@@ -32,14 +37,21 @@ jobs:
           fi
           export RAW_URLS
           URLS_JSON=$(node -e "console.log(JSON.stringify(process.env.RAW_URLS.split(',').map(u => u.trim()).filter(Boolean)))")
+          URL_COUNT=$(node -e "console.log(JSON.parse(process.argv[1]).length)" "$URLS_JSON")
           echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
+          echo "count=${URL_COUNT}" >> $GITHUB_OUTPUT
 
       - name: Create Parent Slack Message
         id: slack-init
+        env:
+          URL_COUNT: ${{ steps.set-matrix.outputs.count }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
+          MESSAGE="🚀 *LPバナーチェックを一括開始しました*(${URL_COUNT}件 / 同時実行数: ${CONCURRENCY}件)"
+          PAYLOAD=$(MESSAGE="$MESSAGE" node -e "console.log(JSON.stringify({channel: process.env.SLACK_CHANNEL, text: process.env.MESSAGE}))")
           RES=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"channel":"${{ secrets.SLACK_CHANNEL }}","text":"🚀 *LPバナーチェックを一括開始しました*(${urls.length}件 / 同時実行数: ${CONCURRENCY}件)"}' \
+            -d "$PAYLOAD" \
             https://slack.com/api/chat.postMessage)
           TS=$(echo $RES | jq -r '.ts')
           echo "thread_ts=${TS}" >> $GITHUB_OUTPUT
@@ -50,7 +62,7 @@ jobs:
     strategy:
       matrix:
         lp_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      max-parallel: 5
+      max-parallel: ${{ fromJson(env.CONCURRENCY) }}
       fail-fast: false
 
     steps:
