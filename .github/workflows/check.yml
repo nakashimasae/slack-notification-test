@@ -39,7 +39,7 @@ jobs:
         run: |
           RES=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"channel":"${{ secrets.SLACK_CHANNEL }}","text":"🚀 *LPバナーチェックを一括開始しました* (並列処理中...)"}' \
+            -d '{"channel":"${{ secrets.SLACK_CHANNEL }}","text":"🚀 *LPバナーチェックを一括開始しました*(${urls.length}件 / 同時実行数: ${CONCURRENCY}件)"}' \
             https://slack.com/api/chat.postMessage)
           TS=$(echo $RES | jq -r '.ts')
           echo "thread_ts=${TS}" >> $GITHUB_OUTPUT
