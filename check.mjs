@@ -293,7 +293,8 @@ async function main() {
           await page.evaluate(() => document.fonts.ready).catch(() => {});
           await page.waitForTimeout(1000);
           const screenshotPath = path.join(OUT_DIR, `lp_${lpIdx}_${v.name}.jpg`);
-          await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 85});
+          // 📉 キャプチャを軽量化（画質85→70。判定への影響は軽微、Slackアップロードも高速化）
+          await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 70});
           let screenshotUrl = null;
           if (S3_ENABLED) {
             const ts = new Date().toISOString().replace(/[:.]/g, '-');
