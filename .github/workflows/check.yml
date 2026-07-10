@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       lp_urls:
-        description: 'チェックするLPのURL（カンマ区切りで複数入力可）'
-        required: true
+        description: 'チェックするLPのURL（カンマ区切りで複数入力可・空欄の場合はlp_urls.txtを参照します）'
+        required: false
+        default: ''
         type: string
 
 jobs:
@@ -15,11 +16,21 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       thread_ts: ${{ steps.slack-init.outputs.thread_ts }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Generate URL matrix
         id: set-matrix
         env:
           RAW_URLS: ${{ github.event.inputs.lp_urls }}
         run: |
+          # 入力欄が空欄の場合は lp_urls.txt（1行1URL、#で始まる行・空行は無視）を参照する。
+          # 入力欄に直接URLが入っていればそちらを優先する。
+          if [ -z "$(echo "$RAW_URLS" | tr -d '[:space:]')" ]; then
+            echo "ℹ️ lp_urls が空欄のため lp_urls.txt を参照します"
+            RAW_URLS=$(grep -v '^\s*#' lp_urls.txt | grep -v '^\s*$' | paste -sd ',' -)
+          fi
+          export RAW_URLS
           URLS_JSON=$(node -e "console.log(JSON.stringify(process.env.RAW_URLS.split(',').map(u => u.trim()).filter(Boolean)))")
           echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
 
