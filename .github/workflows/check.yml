@@ -19,6 +19,7 @@ jobs:
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       count: ${{ steps.set-matrix.outputs.count }}
+      concurrency: ${{ steps.set-matrix.outputs.concurrency }}
       thread_ts: ${{ steps.slack-init.outputs.thread_ts }}
     steps:
       - name: Checkout code
@@ -40,6 +41,9 @@ jobs:
           URL_COUNT=$(node -e "console.log(JSON.parse(process.argv[1]).length)" "$URLS_JSON")
           echo "matrix=${URLS_JSON}" >> $GITHUB_OUTPUT
           echo "count=${URL_COUNT}" >> $GITHUB_OUTPUT
+          # strategy フィールドからは env コンテキストを直接参照できないため、
+          # needs 経由で参照できるよう job output として渡す
+          echo "concurrency=${CONCURRENCY}" >> $GITHUB_OUTPUT
 
       - name: Create Parent Slack Message
         id: slack-init
@@ -62,7 +66,7 @@ jobs:
     strategy:
       matrix:
         lp_url: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      max-parallel: ${{ fromJson(env.CONCURRENCY) }}
+      max-parallel: ${{ fromJson(needs.prepare.outputs.concurrency) }}
       fail-fast: false
 
     steps:
