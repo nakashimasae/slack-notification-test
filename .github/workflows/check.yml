@@ -62,12 +62,10 @@ jobs:
         env:
           LP_URL: ${{ matrix.lp_url }}
           PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }}
-          BANNER_URL: ${{ secrets.BANNER_URL }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_PREFIX: ${{ secrets.S3_PREFIX }}
-          YOOM_WEBHOOK_URL: ${{ secrets.YOOM_WEBHOOK_URL }}
         run: node check.mjs
