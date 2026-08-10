@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       lp_urls:
-        description: 'チェックするLPのURL（カンマ区切りで複数入力可・空欄の場合はlp_urls.txtを参照します）'
+        description: 'チェックするLPのURL（カンマ区切りで複数入力可・空欄の場合はlp_urls.txtを参照します・掲載が確認できたバナーのリンク先LPもPC/SPで自動キャプチャします）'
         required: false
         default: ''
         type: string
