@@ -134,46 +134,32 @@ async function uploadToS3(filepath, key) {
 }
 
 // ページ内の画像を収集する。<img> タグに加えて、CSSの background-image も対象にする。
-// バナーのクリック先（<a href>）も一緒に取得し、後で「掲載先LP」のキャプチャに使う。
 async function collectImageSrcs(page) {
-  const items = [ ];
+  const imageSrcs = [ ];
   for (const frame of page.frames()) {
     try {
-      const results = await frame.evaluate(() => {
-        const closestHref = (el) => {
-          const a = el.closest ? el.closest('a[href]') : null;
-          return a ? a.href : null;
-        };
-
-        const imgItems = Array.from(document.querySelectorAll('img'))
+      const srcs = await frame.evaluate(() => {
+        const imgSrcs = Array.from(document.querySelectorAll('img'))
           .filter((img) => img.complete && img.naturalWidth > 0)
-          .map((img) => ({src: img.currentSrc || img.src, href: closestHref(img)}));
+          .map((img) => img.currentSrc || img.src);
 
-        const bgItems = Array.from(document.querySelectorAll('*'))
+        const bgSrcs = Array.from(document.querySelectorAll('*'))
           .map((el) => {
             const bg = getComputedStyle(el).backgroundImage;
             const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-            return m ? {src: m[1], href: closestHref(el)} : null;
+            return m ? m[1] : null;
           })
           .filter(Boolean);
 
-        return [...imgItems, ...bgItems].filter((it) => it.src && ! it.src.startsWith('data:'));
+        return [...imgSrcs, ...bgSrcs].filter((src) => src && ! src.startsWith('data:'));
       });
-      items.push(...results);
+      imageSrcs.push(...srcs);
     } catch (e) {}
   }
-
-  // src単位で重複排除しつつ、hrefが取れているものを優先する
-  const bySrc = new Map();
-  for (const it of items) {
-    if ( ! bySrc.has(it.src) || ( ! bySrc.get(it.src).href && it.href)) {
-      bySrc.set(it.src, it);
-    }
-  }
-  return [...bySrc.values()];
+  return [...new Set(imageSrcs)];
 }
 
-// 任意のURLをPC/SP指定のビューポートでフルページキャプチャする（バナー掲載先LPのキャプチャに使用）。
+// 任意のURLをPC/SP指定のビューポートでフルページキャプチャする（バナー掲載先LPの手動指定キャプチャに使用）。
 async function captureScreenshot(browser, viewportConfig, url, screenshotPath) {
   const ctx = await browser.newContext(viewportConfig);
   const page = await ctx.newPage();
@@ -229,7 +215,7 @@ function pickWinnersForViewport(groups, viewportResults, deviceName) {
       const r = viewportResults[b.id];
       if ( ! r || ! r.found) continue;
       if ( ! best || r.distance < best.distance) {
-        best = {banner: b, distance: r.distance, bestSrc: r.bestSrc, bestHref: r.bestHref};
+        best = {banner: b, distance: r.distance, bestSrc: r.bestSrc};
       }
     }
     winners.push({sizeKey: g.sizeKey, device: g.device, winner: best});
@@ -237,7 +223,86 @@ function pickWinnersForViewport(groups, viewportResults, deviceName) {
   return winners;
 }
 
+// バナー掲載先LP（クリック後の遷移先URL）を手動指定でPC/SPキャプチャする専用フロー。
+// 自動検出はしない：DEST_URLS に指定されたURLだけを、1回ずつPC/SPでキャプチャしてSlackに送る。
+async function runDestinationCapture() {
+  const rawDestUrls = required('DEST_URLS');
+  const destUrls = rawDestUrls.split(',').map(url => url.trim()).filter(Boolean);
+  await mkdir(OUT_DIR, {recursive: true});
+
+  console.log("=========================================");
+  console.log(`🔗 バナー掲載先LP（手動指定）:`, destUrls);
+  console.log("=========================================");
+
+  const browser = await chromium.launch({
+    args: ['--disable-features=IsolateOrigins,site-per-process']
+  });
+  const viewports = [
+    {name: 'PC', context: {viewport: {width: 1280, height: 800}, deviceScaleFactor: 1}},
+    {name: 'SP', context: devices['iPhone 13']},
+  ];
+
+  const captures = [ ];
+  for (let i = 0; i < destUrls.length; i++) {
+    const url = destUrls[i];
+    const shots = {PC: {path: null, url: null}, SP: {path: null, url: null}};
+    for (const v of viewports) {
+      const screenshotPath = path.join(OUT_DIR, `dest_${i}_${v.name}.jpg`);
+      const res = await captureScreenshot(browser, v.context, url, screenshotPath);
+      if (res.error) {
+        console.error(`Failed to capture banner destination LP ${url} (${v.name}):`, res.error);
+      }
+      shots[v.name] = {path: res.path, url: res.url};
+    }
+    captures.push({url, screenshots: shots});
+  }
+  await browser.close();
+
+  const detailLines = captures.map(c => {
+    const pcOk = c.screenshots.PC.path ? 'OK' : '取得失敗';
+    const spOk = c.screenshots.SP.path ? 'OK' : '取得失敗';
+    return `・${c.url} (PC: ${pcOk} / SP: ${spOk})`;
+  });
+  const headline = '🔗 バナー掲載先LPキャプチャ結果（クリック後の遷移先・手動指定）';
+  const detail = detailLines.join('\n');
+
+  console.log('====== 掲載先LPキャプチャ結果 ======');
+  console.log(headline);
+  console.log(detail);
+  console.log('====================================');
+
+  if (SLACK_BOT_TOKEN && SLACK_CHANNEL) {
+    try {
+      const slack = new WebClient(SLACK_BOT_TOKEN);
+      let rawThreadTs = (process.env.PARENT_THREAD_TS || '').trim();
+      let threadTs = (rawThreadTs && ! rawThreadTs.includes('${{') && ! isNaN(parseFloat(rawThreadTs))) ? rawThreadTs : undefined;
+      await slack.chat.postMessage({
+        channel: SLACK_CHANNEL,
+        ...(threadTs ? {thread_ts: threadTs} : {}),
+        text: `${headline}\n${detail}`,
+      });
+      await Promise.all(captures.flatMap(c => viewports.map(async (v) => {
+        const s = c.screenshots[v.name];
+        if ( ! s.path) return;
+        await slack.files.uploadV2({
+          channel_id: SLACK_CHANNEL,
+          ...(threadTs ? {thread_ts: threadTs} : {}),
+          file_uploads: [{file: s.path, filename: path.basename(s.path)}]
+        }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
+      })));
+    } catch (slackError) {
+      console.error("❌ Slackへの送信でエラーが発生しました:", slackError.message);
+    }
+  } else {
+    console.log("⚠️ SLACK_BOT_TOKEN または SLACK_CHANNEL が未設定のためSlack送信をスキップしました。");
+  }
+}
+
 async function main() {
+  if ((process.env.DEST_URLS || '').trim()) {
+    return await runDestinationCapture();
+  }
+
   const rawLpUrl = required('LP_URL');
   LP_URLS = rawLpUrl.split(',').map(url => url.trim()).filter(Boolean);
   await mkdir(OUT_DIR, {recursive: true});
@@ -296,9 +361,6 @@ async function main() {
   ];
   const allResults = [ ];
   let hasTechnicalError = false;
-  // 🔗 バナーのリンク先（クリック後のLP）は、どのLPで検出しても同じURL（枝分かれのみ）になるため、
-  // LPごとに何度もキャプチャせず、実行全体で1回だけ（重複排除して）キャプチャする。
-  const globalDestHrefs = new Set();
 
   for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
     const lpUrl = LP_URLS[lpIdx];
@@ -351,12 +413,12 @@ async function main() {
           }
           screenshots[v.name] = {path: screenshotPath, url: screenshotUrl};
 
-          const uniqueImages = await collectImageSrcs(page);
-          const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null, bestHref: null}));
-          const hashResults = await Promise.all(uniqueImages.map(async ({src, href}) => {
+          const uniqueSrcs = await collectImageSrcs(page);
+          const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null}));
+          const hashResults = await Promise.all(uniqueSrcs.map(async (src) => {
             try {
               const h = await hashUrl(src);
-              return {src, href, h};
+              return {src, h};
             } catch (e) {
               return null;
             }
@@ -369,7 +431,6 @@ async function main() {
               if (d < b.bestDist) {
                 b.bestDist = d;
                 b.bestSrc = res.src;
-                b.bestHref = res.href;
               }
             }
           }
@@ -378,14 +439,13 @@ async function main() {
               found: b.bestDist <= THRESHOLD,
               distance: b.bestDist,
               bestSrc: b.bestSrc,
-              bestHref: b.bestHref,
             };
           }
         } catch (err) {
           console.error(`Failed to process LP ${lpUrl} (${v.name}):`, err);
           navError[v.name] = true;
           for (const b of banners) {
-            results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null, bestHref: null};
+            results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null};
           }
           screenshots[v.name] = {path: null, url: null};
         } finally {
@@ -414,33 +474,8 @@ async function main() {
     const winnersPC = pickWinnersForViewport(bannerGroups, results.PC, 'PC');
     const winnersSP = pickWinnersForViewport(bannerGroups, results.SP, 'SP');
 
-    // 掲載が確認できたバナーのリンク先（クリック後のLP）を記録する（キャプチャは全体で1回だけ後段でまとめて行う）
-    for (const w of [...winnersPC, ...winnersSP]) {
-      if (w.winner && w.winner.bestHref && ! LP_URLS.includes(w.winner.bestHref)) {
-        globalDestHrefs.add(w.winner.bestHref);
-      }
-    }
-
     allResults.push({lpUrl, lpIdx, results, screenshots, navError, winnersPC, winnersSP});
   }
-
-  // 🔗 バナーのリンク先（クリック後のLP）を、PC/SPの2パターンで1回だけキャプチャする
-  const destinationCaptures = [ ];
-  let destIdx = 0;
-  for (const href of globalDestHrefs) {
-    const shots = {PC: {path: null, url: null}, SP: {path: null, url: null}};
-    for (const v of viewports) {
-      const screenshotPath = path.join(OUT_DIR, `dest_${destIdx}_${v.name}.jpg`);
-      const res = await captureScreenshot(browser, v.context, href, screenshotPath);
-      if (res.error) {
-        console.error(`Failed to capture banner destination LP ${href} (${v.name}):`, res.error);
-      }
-      shots[v.name] = {path: res.path, url: res.url};
-    }
-    destinationCaptures.push({href, screenshots: shots});
-    destIdx++;
-  }
-
   await browser.close();
 
   // ====== レポート生成 ======
@@ -470,15 +505,6 @@ async function main() {
       detailLines.push(`    ・${w.sizeKey}: ${label}`);
     });
   });
-
-  if (destinationCaptures.length > 0) {
-    detailLines.push(`\n🔗 *バナー掲載先LP（クリック後の遷移先・全LP共通のため1回だけ取得）*`);
-    destinationCaptures.forEach(d => {
-      const pcOk = d.screenshots.PC.path ? 'OK' : '取得失敗';
-      const spOk = d.screenshots.SP.path ? 'OK' : '取得失敗';
-      detailLines.push(`  ・${d.href} (PC: ${pcOk} / SP: ${spOk})`);
-    });
-  }
 
   const headline = hasTechnicalError
     ? '⚠️ 一部LPの画面取得でエラーが発生しました（下記詳細を確認してください）'
@@ -512,17 +538,6 @@ async function main() {
         await slack.files.uploadV2({
           channel_id: SLACK_CHANNEL,
           ...(threadTs ? {thread_ts: threadTs} : {}),
-          file_uploads: [{file: s.path, filename: path.basename(s.path)}]
-        }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
-      })));
-      // 🔗 バナー掲載先LP（クリック後の遷移先）のPC/SPキャプチャもアップロードする（全LP共通のため1回分のみ）
-      await Promise.all(destinationCaptures.flatMap(d => viewports.map(async (v) => {
-        const s = d.screenshots[v.name];
-        if ( ! s.path) return;
-        await slack.files.uploadV2({
-          channel_id: SLACK_CHANNEL,
-          ...(threadTs ? {thread_ts: threadTs} : {}),
-          initial_comment: `🔗 掲載先LP: ${d.href}`,
           file_uploads: [{file: s.path, filename: path.basename(s.path)}]
         }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
       })));
