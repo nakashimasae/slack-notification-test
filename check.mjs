@@ -134,29 +134,71 @@ async function uploadToS3(filepath, key) {
 }
 
 // ページ内の画像を収集する。<img> タグに加えて、CSSの background-image も対象にする。
+// バナーのクリック先（<a href>）も一緒に取得し、後で「掲載先LP」のキャプチャに使う。
 async function collectImageSrcs(page) {
-  const imageSrcs = [ ];
+  const items = [ ];
   for (const frame of page.frames()) {
     try {
-      const srcs = await frame.evaluate(() => {
-        const imgSrcs = Array.from(document.querySelectorAll('img'))
-          .filter((img) => img.complete && img.naturalWidth > 0)
-          .map((img) => img.currentSrc || img.src);
+      const results = await frame.evaluate(() => {
+        const closestHref = (el) => {
+          const a = el.closest ? el.closest('a[href]') : null;
+          return a ? a.href : null;
+        };
 
-        const bgSrcs = Array.from(document.querySelectorAll('*'))
+        const imgItems = Array.from(document.querySelectorAll('img'))
+          .filter((img) => img.complete && img.naturalWidth > 0)
+          .map((img) => ({src: img.currentSrc || img.src, href: closestHref(img)}));
+
+        const bgItems = Array.from(document.querySelectorAll('*'))
           .map((el) => {
             const bg = getComputedStyle(el).backgroundImage;
             const m = bg && bg.match(/url\(["']?(.*?)["']?\)/);
-            return m ? m[1] : null;
+            return m ? {src: m[1], href: closestHref(el)} : null;
           })
           .filter(Boolean);
 
-        return [...imgSrcs, ...bgSrcs].filter((src) => src && ! src.startsWith('data:'));
+        return [...imgItems, ...bgItems].filter((it) => it.src && ! it.src.startsWith('data:'));
       });
-      imageSrcs.push(...srcs);
+      items.push(...results);
     } catch (e) {}
   }
-  return [...new Set(imageSrcs)];
+
+  // src単位で重複排除しつつ、hrefが取れているものを優先する
+  const bySrc = new Map();
+  for (const it of items) {
+    if ( ! bySrc.has(it.src) || ( ! bySrc.get(it.src).href && it.href)) {
+      bySrc.set(it.src, it);
+    }
+  }
+  return [...bySrc.values()];
+}
+
+// 任意のURLをPC/SP指定のビューポートでフルページキャプチャする（バナー掲載先LPのキャプチャに使用）。
+async function captureScreenshot(browser, viewportConfig, url, screenshotPath) {
+  const ctx = await browser.newContext(viewportConfig);
+  const page = await ctx.newPage();
+  try {
+    await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 150000});
+    await hideOverlays(page);
+    await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {});
+    await page.locator('text=×').first().click({timeout: 2000}).catch(() => {});
+    await autoScroll(page);
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.evaluate(() => document.fonts.ready).catch(() => {});
+    await page.waitForTimeout(1000);
+    await page.screenshot({path: screenshotPath, fullPage: true, type: 'jpeg', quality: 70});
+    let screenshotUrl = null;
+    if (S3_ENABLED) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const key = `${S3_PREFIX}${ts}_${path.basename(screenshotPath, '.jpg')}.jpg`;
+      screenshotUrl = await uploadToS3(screenshotPath, key);
+    }
+    return {path: screenshotPath, url: screenshotUrl, error: null};
+  } catch (err) {
+    return {path: null, url: null, error: err};
+  } finally {
+    await ctx.close();
+  }
 }
 
 // サイズ(px)ごとにバナーをグルーピングする。
@@ -187,7 +229,7 @@ function pickWinnersForViewport(groups, viewportResults, deviceName) {
       const r = viewportResults[b.id];
       if ( ! r || ! r.found) continue;
       if ( ! best || r.distance < best.distance) {
-        best = {banner: b, distance: r.distance, bestSrc: r.bestSrc};
+        best = {banner: b, distance: r.distance, bestSrc: r.bestSrc, bestHref: r.bestHref};
       }
     }
     winners.push({sizeKey: g.sizeKey, device: g.device, winner: best});
@@ -254,6 +296,9 @@ async function main() {
   ];
   const allResults = [ ];
   let hasTechnicalError = false;
+  // 🔗 バナーのリンク先（クリック後のLP）は、どのLPで検出しても同じURL（枝分かれのみ）になるため、
+  // LPごとに何度もキャプチャせず、実行全体で1回だけ（重複排除して）キャプチャする。
+  const globalDestHrefs = new Set();
 
   for (let lpIdx = 0; lpIdx < LP_URLS.length; lpIdx++) {
     const lpUrl = LP_URLS[lpIdx];
@@ -306,12 +351,12 @@ async function main() {
           }
           screenshots[v.name] = {path: screenshotPath, url: screenshotUrl};
 
-          const uniqueSrcs = await collectImageSrcs(page);
-          const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null}));
-          const hashResults = await Promise.all(uniqueSrcs.map(async (src) => {
+          const uniqueImages = await collectImageSrcs(page);
+          const bannerMatches = banners.map(b => ({id: b.id, bestDist: Infinity, bestSrc: null, bestHref: null}));
+          const hashResults = await Promise.all(uniqueImages.map(async ({src, href}) => {
             try {
               const h = await hashUrl(src);
-              return {src, h};
+              return {src, href, h};
             } catch (e) {
               return null;
             }
@@ -324,6 +369,7 @@ async function main() {
               if (d < b.bestDist) {
                 b.bestDist = d;
                 b.bestSrc = res.src;
+                b.bestHref = res.href;
               }
             }
           }
@@ -332,13 +378,14 @@ async function main() {
               found: b.bestDist <= THRESHOLD,
               distance: b.bestDist,
               bestSrc: b.bestSrc,
+              bestHref: b.bestHref,
             };
           }
         } catch (err) {
           console.error(`Failed to process LP ${lpUrl} (${v.name}):`, err);
           navError[v.name] = true;
           for (const b of banners) {
-            results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null};
+            results[v.name][b.id] = {found: false, distance: Infinity, bestSrc: null, bestHref: null};
           }
           screenshots[v.name] = {path: null, url: null};
         } finally {
@@ -367,8 +414,33 @@ async function main() {
     const winnersPC = pickWinnersForViewport(bannerGroups, results.PC, 'PC');
     const winnersSP = pickWinnersForViewport(bannerGroups, results.SP, 'SP');
 
+    // 掲載が確認できたバナーのリンク先（クリック後のLP）を記録する（キャプチャは全体で1回だけ後段でまとめて行う）
+    for (const w of [...winnersPC, ...winnersSP]) {
+      if (w.winner && w.winner.bestHref && ! LP_URLS.includes(w.winner.bestHref)) {
+        globalDestHrefs.add(w.winner.bestHref);
+      }
+    }
+
     allResults.push({lpUrl, lpIdx, results, screenshots, navError, winnersPC, winnersSP});
   }
+
+  // 🔗 バナーのリンク先（クリック後のLP）を、PC/SPの2パターンで1回だけキャプチャする
+  const destinationCaptures = [ ];
+  let destIdx = 0;
+  for (const href of globalDestHrefs) {
+    const shots = {PC: {path: null, url: null}, SP: {path: null, url: null}};
+    for (const v of viewports) {
+      const screenshotPath = path.join(OUT_DIR, `dest_${destIdx}_${v.name}.jpg`);
+      const res = await captureScreenshot(browser, v.context, href, screenshotPath);
+      if (res.error) {
+        console.error(`Failed to capture banner destination LP ${href} (${v.name}):`, res.error);
+      }
+      shots[v.name] = {path: res.path, url: res.url};
+    }
+    destinationCaptures.push({href, screenshots: shots});
+    destIdx++;
+  }
+
   await browser.close();
 
   // ====== レポート生成 ======
@@ -398,6 +470,15 @@ async function main() {
       detailLines.push(`    ・${w.sizeKey}: ${label}`);
     });
   });
+
+  if (destinationCaptures.length > 0) {
+    detailLines.push(`\n🔗 *バナー掲載先LP（クリック後の遷移先・全LP共通のため1回だけ取得）*`);
+    destinationCaptures.forEach(d => {
+      const pcOk = d.screenshots.PC.path ? 'OK' : '取得失敗';
+      const spOk = d.screenshots.SP.path ? 'OK' : '取得失敗';
+      detailLines.push(`  ・${d.href} (PC: ${pcOk} / SP: ${spOk})`);
+    });
+  }
 
   const headline = hasTechnicalError
     ? '⚠️ 一部LPの画面取得でエラーが発生しました（下記詳細を確認してください）'
@@ -431,6 +512,17 @@ async function main() {
         await slack.files.uploadV2({
           channel_id: SLACK_CHANNEL,
           ...(threadTs ? {thread_ts: threadTs} : {}),
+          file_uploads: [{file: s.path, filename: path.basename(s.path)}]
+        }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
+      })));
+      // 🔗 バナー掲載先LP（クリック後の遷移先）のPC/SPキャプチャもアップロードする（全LP共通のため1回分のみ）
+      await Promise.all(destinationCaptures.flatMap(d => viewports.map(async (v) => {
+        const s = d.screenshots[v.name];
+        if ( ! s.path) return;
+        await slack.files.uploadV2({
+          channel_id: SLACK_CHANNEL,
+          ...(threadTs ? {thread_ts: threadTs} : {}),
+          initial_comment: `🔗 掲載先LP: ${d.href}`,
           file_uploads: [{file: s.path, filename: path.basename(s.path)}]
         }).catch(e => console.error(`⚠️ 画像アップロード失敗 (${s.path}):`, e.message));
       })));
