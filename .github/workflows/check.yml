@@ -2,7 +2,7 @@ name: LP Banner Check
 
 env:
   # 同時実行数（Slackの親メッセージと check ジョブの max-parallel の両方でここを参照する）
-  CONCURRENCY: 5
+  CONCURRENCY: 10
 
 on:
   workflow_dispatch:
@@ -81,10 +81,24 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      # 👇 ここを追加して、ブラウザと必要なシステムライブラリを強制インストールします
-      - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
-        
+      # 🚀 Playwrightのブラウザ本体をキャッシュして、毎ジョブでのダウンロードを避ける
+      # （check.mjs は chromium しか使わないため、インストール対象も chromium のみに絞る）
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-${{ hashFiles('package.json') }}
+
+      - name: Install Playwright Chromium (cache miss)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      # ブラウザ本体はキャッシュされていても、OS側の依存ライブラリはランナーに残らないため毎回必要
+      - name: Install Playwright system dependencies (cache hit)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
       - name: Run check script
         env:
           LP_URL: ${{ matrix.lp_url }}
