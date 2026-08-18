@@ -8,7 +8,12 @@ on:
   workflow_dispatch:
     inputs:
       lp_urls:
-        description: 'チェックするLPのURL（カンマ区切りで複数入力可・空欄の場合はlp_urls.txtを参照します・掲載が確認できたバナーのリンク先LPもPC/SPで自動キャプチャします）'
+        description: 'チェックするLPのURL（カンマ区切りで複数入力可・空欄の場合はlp_urls.txtを参照します）'
+        required: false
+        default: ''
+        type: string
+      banner_destination_url:
+        description: 'バナー掲載先LPのURL（バナークリック後の遷移先・カンマ区切りで複数入力可・空欄の場合はキャプチャをスキップします）'
         required: false
         default: ''
         type: string
@@ -51,7 +56,7 @@ jobs:
           URL_COUNT: ${{ steps.set-matrix.outputs.count }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          MESSAGE="🚀 *LPバナーチェックを一括開始しました*(${URL_COUNT}件 / 同時実行数: ${CONCURRENCY}件)"
+          MESSAGE="🚀 **LPバナーチェックを一括開始しました**(${URL_COUNT}件 / 同時実行数: ${CONCURRENCY}件)"
           PAYLOAD=$(MESSAGE="$MESSAGE" node -e "console.log(JSON.stringify({channel: process.env.SLACK_CHANNEL, text: process.env.MESSAGE}))")
           RES=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
             -H "Content-Type: application/json" \
@@ -102,6 +107,39 @@ jobs:
       - name: Run check script
         env:
           LP_URL: ${{ matrix.lp_url }}
+          PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_PREFIX: ${{ secrets.S3_PREFIX }}
+        run: node check.mjs
+
+  # 🔗 バナー掲載先LP（バナークリック後の遷移先・手動指定）のPC/SPキャプチャ。
+  # LPの数に関わらず遷移先は1つ（枝分かれのみ）のため、matrix化せず1回だけ実行する。
+  capture_banner_destination:
+    needs: prepare
+    if: ${{ github.event.inputs.banner_destination_url != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: Capture banner destination LP
+        env:
+          DEST_URLS: ${{ github.event.inputs.banner_destination_url }}
           PARENT_THREAD_TS: ${{ needs.prepare.outputs.thread_ts }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
