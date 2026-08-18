@@ -2,7 +2,7 @@ name: LP Banner Check
 
 env:
   # 同時実行数（Slackの親メッセージと check ジョブの max-parallel の両方でここを参照する）
-  CONCURRENCY: 5
+  CONCURRENCY: 10
 
 on:
   workflow_dispatch:
@@ -56,7 +56,7 @@ jobs:
           URL_COUNT: ${{ steps.set-matrix.outputs.count }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          MESSAGE="🚀 *LPバナーチェックを一括開始しました*(${URL_COUNT}件 / 同時実行数: ${CONCURRENCY}件)"
+          MESSAGE="🚀 **LPバナーチェックを一括開始しました**(${URL_COUNT}件 / 同時実行数: ${CONCURRENCY}件)"
           PAYLOAD=$(MESSAGE="$MESSAGE" node -e "console.log(JSON.stringify({channel: process.env.SLACK_CHANNEL, text: process.env.MESSAGE}))")
           RES=$(curl -s -X POST -H "Authorization: Bearer ${{ secrets.SLACK_BOT_TOKEN }}" \
             -H "Content-Type: application/json" \
