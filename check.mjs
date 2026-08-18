@@ -93,6 +93,24 @@ async function hideOverlays(page) {
   }).catch(() => {});
 }
 
+// モーダルの閉じるボタンを押す。
+// 「閉じる」「×」というテキストは、バナー自体やその親要素が <a href> で
+// 覆われているケースがあり、無条件にクリックすると本来のLPから離脱して
+// バナーのリンク先（掲載先LP）に遷移してしまい、以降のスクショが
+// 意図したLPではなく掲載先LPのものになってしまう。
+// そのためリンク（またはリンクの子孫）の要素はクリック対象から除外する。
+async function clickCloseIfSafe(page, text) {
+  const candidates = page.locator(`text=${text}`);
+  const count = await candidates.count().catch(() => 0);
+  for (let i = 0; i < count; i++) {
+    const el = candidates.nth(i);
+    const isLink = await el.evaluate((node) => !!node.closest('a[href]')).catch(() => true);
+    if (isLink) continue;
+    const clicked = await el.click({timeout: 2000}).then(() => true).catch(() => false);
+    if (clicked) return;
+  }
+}
+
 async function downloadToFile(url, filepath) {
   if ( ! url.startsWith('http') ) {
     const buf = await readFile(url);
@@ -180,8 +198,8 @@ async function captureScreenshot(browser, viewportConfig, url, screenshotPath) {
   try {
     await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 150000});
     await hideOverlays(page);
-    await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {});
-    await page.locator('text=×').first().click({timeout: 2000}).catch(() => {});
+    await clickCloseIfSafe(page, '閉じる');
+    await clickCloseIfSafe(page, '×');
     await autoScroll(page);
     await page.waitForLoadState('networkidle').catch(() => {});
     await page.evaluate(() => document.fonts.ready).catch(() => {});
@@ -334,8 +352,8 @@ async function main() {
           // 'domcontentloaded' + 後続のスクロール/networkidle待ちで十分描画は待てるため、こちらに変更。
           await page.goto(lpUrl, {waitUntil: 'domcontentloaded', timeout: 150000});
           await hideOverlays(page);
-          await page.locator('text=閉じる').first().click({timeout: 2000}).catch(() => {});
-          await page.locator('text=×').first().click({timeout: 2000}).catch(() => {});
+          await clickCloseIfSafe(page, '閉じる');
+          await clickCloseIfSafe(page, '×');
           await autoScroll(page);
           await page.waitForLoadState('networkidle').catch(() => {});
           await page.evaluate(() => document.fonts.ready).catch(() => {});
