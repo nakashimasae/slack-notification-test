@@ -205,7 +205,10 @@ async function captureScreenshot(browser, viewportConfig, url, screenshotPath) {
   const ctx = await browser.newContext(viewportConfig);
   const page = await ctx.newPage();
   try {
-    await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 150000});
+   const response = await page.goto(url, {waitUntil: 'domcontentloaded', timeout: 150000});
+   if (response && response.status() >= 400) {
+     throw new Error(`撮影先サイトがエラーを返しました（HTTP ${response.status()}）。アクセスが拒否されている可能性があります。`);
+   }
     await hideOverlays(page);
     await clickCloseIfSafe(page, '閉じる');
     await clickCloseIfSafe(page, '×');
@@ -436,7 +439,10 @@ async function main() {
           // 'load' は広告タグ等の外部リソース全ての完了を待つため、
           // 1つでも遅延・ハングするとタイムアウトしやすい。
           // 'domcontentloaded' + 後続のスクロール/networkidle待ちで十分描画は待てるため、こちらに変更。
-          await page.goto(lpUrl, {waitUntil: 'domcontentloaded', timeout: 150000});
+         const response = await page.goto(lpUrl, {waitUntil: 'domcontentloaded', timeout: 150000});
+         if (response && response.status() >= 400) {
+         throw new Error(`撮影先サイトがエラーを返しました（HTTP ${response.status()}）。アクセスが拒否されている可能性があります。`);
+   }
           await hideOverlays(page);
           await clickCloseIfSafe(page, '閉じる');
           await clickCloseIfSafe(page, '×');
